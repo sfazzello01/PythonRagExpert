@@ -1,0 +1,12 @@
+langchain
+langchain-community
+langchain-ollama
+langchain-qdrant
+langchain-core
+qdrant_client
+fastapi
+pydantic
+uvicorn
+langchain-text-splitters
+tqdm
+rank-bm25

@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+crawl4ai
+levenshtein
+python-json-logger
+mariadb
+mistune
+beautifulsoup4
+markdownify

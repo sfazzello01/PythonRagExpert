@@ -1,0 +1,102 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8003:8003"
+    container_name: backend
+    depends_on:
+      database:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./gs_data:/app/gs_data:ro
+      - ./domains.json:/app/domains.json:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - MYSQL_HOST=database
+  
+  frontend:
+    build: ./frontend
+    ports:
+      - "8004:8004"
+    container_name: frontend
+    depends_on:
+      - backend
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - BACKEND_URL=http://backend:8003
+
+  database:
+    image: mariadb:latest
+    container_name: database
+    env_file:
+      - .env
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -h 127.0.0.1 -u root -p\"$MYSQL_ROOT_PASSWORD\" -e 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    environment:
+    - OLLAMA_CONTEXT_LENGTH=64000
+    volumes:
+      - ./ollama_data:/root/.ollama
+    #----per gpu NVIDIA---, eliminare se non si ha scheda NVIDIA#
+    # deploy:
+    #  resources:
+    #    reservations:
+    #     devices:
+    #        - driver: nvidia
+    #          count: 1 
+    #          capabilities: [gpu]
+    #----per gpu NVIDIA---, eliminare se non si ha scheda NVIDIA#
+    entrypoint: /bin/sh -c "ollama serve"
+
+  adminer:
+    image: adminer:latest
+    container_name: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - database
+    environment:
+      - ADMINER_DEFAULT_SERVER=database
+
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports: ["6333:6333"]
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+
+  esperto:
+    build: ./esperto
+    container_name: esperto
+    ports:
+      - "5000:5000"
+    depends_on:
+      - ollama
+      - qdrant
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./frontend:/app/frontend:ro
+      - ./gs_data:/app/gs_data:ro
+      - ./domains.json:/app/domains.json:ro
+      - ./docker-compose.yaml:/app/docker-compose.yaml:ro
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - QDRANT_HOST=qdrant

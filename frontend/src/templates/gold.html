@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <title>Gold Standard Builder</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body class="dark-theme">
+    <header>
+        <a href="/" class="link-header-style">⬅Home Progetto</a>
+        <div class="system-status">
+            <span>Backend: <strong class="{{ status.backend }}">{{ status.backend }}</strong></span>
+            <span>DB: <strong class="{{ status.database }}">{{ status.database }}</strong></span>
+            <span>Ollama: <strong class="{{ status.ollama }}">{{ status.ollama }}</strong></span>
+        </div>
+    </header>
+
+    <main class="container">
+        <header class="section-header">
+            <h2>Gestione Gold Standard</h2>
+            <p class="subtitle">Inserisci o modifica i testi di riferimento per la valutazione.</p>
+        </header>
+
+        <div class="builder-grid builder-grid--wide">
+            <section class="card editor-section">
+                <h3>Crea / Aggiorna Entry</h3>
+                <form id="gs-form">
+                    <div class="form-group">
+                        <label for="gs-url">URL del documento:</label>
+                        <input type="url" id="gs-url" name="url" placeholder="https://..." required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="gs-domain">Dominio:</label>
+                        <select id="gs-domain" name="domain">
+                            {% for domain in domains %}
+                                <option value="{{ domain }}">{{ domain|capitalize }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gs-html">HTML Sorgente (statico)</label>
+                        <div class="html-controls">
+                            <button type="button" id="load-html" class="btn-secondary">Carica HTML</button>
+                            <button type="button" id="copy-html" class="btn-secondary">Copia HTML</button>
+                            <button type="button" id="open-html" class="btn-secondary">Apri HTML</button>
+                        </div>
+                        <textarea id="gs-html" name="html_text" rows="10" placeholder="HTML originale o scaricato dal server..." class="gs-html"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gs-content">Testo Gold Standard (Pulito):</label>
+                        <textarea id="gs-content" name="content" rows="18" placeholder="Incolla qui il testo privo di boilerplate..." class="gs-content"></textarea>
+                    </div>
+
+                    <div class="actions">
+                        <button type="submit" class="btn-primary">Salva nel DB</button>
+                        <button type="reset" class="btn-secondary">Svuota</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card list-section list-section--compact">
+                <h3>Documenti Salvati</h3>
+                <div class="search-bar">
+                    <input type="text" id="search-gs" placeholder="Filtra per URL o dominio...">
+                </div>
+                <div class="select-wrapper">
+                    <select id="gs-select" size="10" class="select-full"></select>
+                </div>
+                <div class="actions actions-row">
+                    <button type="button" id="edit-selected" class="btn-primary" disabled>Modifica</button>
+                    <button type="button" id="delete-selected" class="btn-secondary" disabled>Elimina</button>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const gsForm = document.getElementById('gs-form');
+            const submitButton = gsForm.querySelector('button[type="submit"]');
+            const resetButton = gsForm.querySelector('button[type="reset"]');
+            const urlInput = document.getElementById('gs-url');
+            const domainSelect = document.getElementById('gs-domain');
+            const htmlInput = document.getElementById('gs-html');
+            const loadHtmlBtn = document.getElementById('load-html');
+            const copyHtmlBtn = document.getElementById('copy-html');
+            const openHtmlBtn = document.getElementById('open-html');
+            const contentInput = document.getElementById('gs-content');
+            const searchInput = document.getElementById('search-gs');
+            const selectInput = document.getElementById('gs-select');
+            const editSelectedBtn = document.getElementById('edit-selected');
+            const deleteSelectedBtn = document.getElementById('delete-selected');
+
+            let allEntries = [];
+            let editingUrl = '';
+
+            const normalize = (value) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
+            const setSubmitState = () => {
+                submitButton.textContent = editingUrl ? 'Aggiorna nel DB' : 'Salva nel DB';
+            };
+            const clearEditingState = () => {
+                editingUrl = '';
+                setSubmitState();
+            };
+            const getFilteredEntries = () => {
+                const query = normalize(searchInput.value);
+                return query
+                    ? allEntries.filter((entry) => [entry.domain, entry.url, entry.title].some((field) => normalize(field).includes(query)))
+                    : allEntries;
+            };
+
+            function computeLabel(entry) {
+                // Prefer explicit title, then attempt to extract <title> from HTML, then hostname, then full URL
+                let title = (entry.title || '').trim();
+                if (!title && entry.html_text && typeof entry.html_text === 'string') {
+                    const m = entry.html_text.match(/<title[^>]*>([^<]*)<\/title>/i);
+                    if (m && m[1]) title = m[1].trim();
+                }
+                if (!title && entry.url) {
+                    try {
+                        const u = new URL(entry.url);
+                        title = u.hostname;
+                    } catch (e) {
+                        title = entry.url;
+                    }
+                }
+                const prefix = entry.domain ? entry.domain + ' · ' : '';
+                return prefix + (title || '');
+            }
+
+            function renderEmptyRow(message) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.colSpan = 3;
+                cell.textContent = message;
+                row.appendChild(cell);
+                return row;
+            }
+
+            function fillForm(entry) {
+                urlInput.value = entry.url || '';
+                htmlInput.value = entry.html_text || '';
+                contentInput.value = entry.gold_text || '';
+                if (entry.domain) domainSelect.value = entry.domain;
+
+                editingUrl = entry.url || '';
+                setSubmitState();
+                urlInput.focus();
+            }
+
+            function renderTable() {
+                const entries = getFilteredEntries();
+                selectInput.replaceChildren();
+                editSelectedBtn.disabled = true;
+                deleteSelectedBtn.disabled = true;
+
+                if (!entries.length) {
+                    const opt = document.createElement('option');
+                    opt.disabled = true;
+                    opt.textContent = 'Nessun documento salvato per il filtro corrente.';
+                    selectInput.appendChild(opt);
+                    return;
+                }
+
+                entries.forEach((entry) => {
+                    const opt = document.createElement('option');
+                    opt.value = entry.url || '';
+                    const label = computeLabel(entry);
+                    opt.textContent = label;
+                    opt.title = label;
+                    selectInput.appendChild(opt);
+                });
+
+                if (editingUrl && Array.from(selectInput.options).some((o) => o.value === editingUrl)) {
+                    selectInput.value = editingUrl;
+                    editSelectedBtn.disabled = false;
+                    deleteSelectedBtn.disabled = false;
+                }
+            }
+
+            async function loadEntries(domain) {
+                selectInput.replaceChildren();
+                const loadingOpt = document.createElement('option');
+                loadingOpt.disabled = true;
+                loadingOpt.textContent = 'Caricamento dei documenti...';
+                selectInput.appendChild(loadingOpt);
+
+                try {
+                    const response = await fetch(`/api/full_gold_standard?domain=${encodeURIComponent(domain)}`, {
+                        headers: {
+                            Accept: 'application/json',
+                        },
+                    });
+
+                    const payload = await response.json().catch(() => ({}));
+                    const entries = response.ok && Array.isArray(payload.gold_standard)
+                        ? payload.gold_standard
+                        : [];
+
+                    allEntries = entries;
+
+                    if (!allEntries.some((entry) => entry.url === editingUrl)) {
+                        clearEditingState();
+                    }
+
+                    renderTable();
+                } catch (error) {
+                    console.error(error);
+                    allEntries = [];
+                    clearEditingState();
+                    selectInput.replaceChildren();
+                    const errOpt = document.createElement('option');
+                    errOpt.disabled = true;
+                    errOpt.textContent = 'Errore nel caricamento dei documenti.';
+                    selectInput.appendChild(errOpt);
+                }
+            }
+
+            async function submitForm(event) {
+                event.preventDefault();
+
+                const urlValue = urlInput.value.trim();
+                let htmlValue = htmlInput.value.trim();
+                const goldText = contentInput.value.trim();
+
+                if (!urlValue || !goldText) {
+                    alert('Inserisci URL e testo Gold Standard prima di salvare.');
+                    return;
+                }
+
+                submitButton.disabled = true;
+                submitButton.textContent = editingUrl ? 'Aggiornamento...' : 'Salvataggio...';
+
+                try {
+                    // se non abbiamo HTML, proviamo a scaricarlo
+                    if (!htmlValue) {
+                        const parseResp = await fetch('/api/parse', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ url: urlValue, local: false }),
+                        });
+                        const parsePayload = await parseResp.json().catch(() => ({}));
+                        if (parseResp.ok) {
+                            htmlValue = parsePayload.html_text || '';
+                            htmlInput.value = htmlValue;
+                        }
+                    }
+
+                    // salva o aggiorna la web resource (HTML)
+                    const webResp = await fetch('/api/add_web_resource', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: urlValue, html_text: htmlValue, domain: domainSelect.value, title: '' }),
+                    });
+                    const webPayload = await webResp.json().catch(() => ({}));
+                    if (!webResp.ok || webPayload.status !== 'ok') {
+                        throw new Error(webPayload.detail || webPayload.error || 'Salvataggio HTML non riuscito');
+                    }
+
+                    // poi salva il gold standard
+                    const gsResp = await fetch('/api/add_gold_standard', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: urlValue, gold_text: goldText }),
+                    });
+                    const gsPayload = await gsResp.json().catch(() => ({}));
+                    if (!gsResp.ok || gsPayload.status !== 'ok') {
+                        throw new Error(gsPayload.detail || gsPayload.error || 'Salvataggio Gold Standard non riuscito');
+                    }
+
+                    editingUrl = urlValue;
+                    await loadEntries(domainSelect.value);
+                } catch (error) {
+                    console.error(error);
+                    alert(`Errore durante il salvataggio: ${error.message}`);
+                } finally {
+                    submitButton.disabled = false;
+                    setSubmitState();
+                }
+            }
+
+            gsForm.addEventListener('submit', submitForm);
+
+            loadHtmlBtn.addEventListener('click', async () => {
+                const urlValue = urlInput.value.trim();
+                if (!urlValue) {
+                    alert('Inserisci prima l\'URL da caricare.');
+                    return;
+                }
+                loadHtmlBtn.disabled = true;
+                try {
+                    const resp = await fetch('/api/parse', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: urlValue, local: false }),
+                    });
+                    const data = await resp.json().catch(() => ({}));
+                    if (!resp.ok) {
+                        throw new Error(data.detail || data.error || 'Errore durante il download dell\'HTML');
+                    }
+                    htmlInput.value = data.html_text || '';
+                } catch (err) {
+                    console.error(err);
+                    alert('Errore caricamento HTML: ' + (err.message || err));
+                } finally {
+                    loadHtmlBtn.disabled = false;
+                }
+            });
+
+            copyHtmlBtn.addEventListener('click', async () => {
+                const text = htmlInput.value || '';
+                if (!text) {
+                    alert('Nessun HTML da copiare');
+                    return;
+                }
+                try {
+                    await navigator.clipboard.writeText(text);
+                    alert('HTML copiato negli appunti');
+                } catch (err) {
+                    try {
+                        htmlInput.select();
+                        document.execCommand('copy');
+                        alert('HTML copiato negli appunti (fallback)');
+                    } catch (e) {
+                        console.error(e);
+                        alert('Copia non riuscita');
+                    }
+                }
+            });
+
+            openHtmlBtn.addEventListener('click', () => {
+                const html = htmlInput.value || '';
+                if (!html) {
+                    alert('Nessun HTML da aprire');
+                    return;
+                }
+
+                // Determina base per risolvere link e CSS relativi
+                let baseUrl = '';
+                try {
+                    const u = new URL(urlInput.value.trim());
+                    baseUrl = u.origin + '/';
+                } catch (e) {
+                    if (domainSelect && domainSelect.value) {
+                        baseUrl = 'https://' + domainSelect.value + '/';
+                    } else {
+                        baseUrl = '/';
+                    }
+                }
+
+                let htmlToOpen = html;
+                if (!/<base[\s>]/i.test(htmlToOpen)) {
+                    const baseTag = `<base href="${baseUrl}">`;
+                    if (/<head[^>]*>/i.test(htmlToOpen)) {
+                        htmlToOpen = htmlToOpen.replace(/(<head[^>]*>)/i, `$1\n    ${baseTag}`);
+                    } else if (/<html[^>]*>/i.test(htmlToOpen)) {
+                        htmlToOpen = htmlToOpen.replace(/(<html[^>]*>)/i, `$1\n    ${baseTag}`);
+                    } else {
+                        htmlToOpen = baseTag + '\n' + htmlToOpen;
+                    }
+                }
+
+                const w = window.open('', '_blank');
+                if (!w) {
+                    alert('Impossibile aprire la nuova finestra (popup bloccato)');
+                    return;
+                }
+                w.document.open();
+                w.document.write(htmlToOpen);
+                w.document.close();
+            });
+
+            // select actions
+            selectInput.addEventListener('change', () => {
+                const url = selectInput.value;
+                const enabled = !!url;
+                editSelectedBtn.disabled = !enabled;
+                deleteSelectedBtn.disabled = !enabled;
+            });
+
+            editSelectedBtn.addEventListener('click', () => {
+                const url = selectInput.value;
+                if (!url) return;
+                const entry = allEntries.find((e) => e.url === url);
+                if (entry) fillForm(entry);
+            });
+
+            deleteSelectedBtn.addEventListener('click', async () => {
+                const url = selectInput.value;
+                if (!url) return;
+                const confirmed = window.confirm(`Eliminare il gold standard per:\n${url}?`);
+                if (!confirmed) return;
+                deleteSelectedBtn.disabled = true;
+                try {
+                    const response = await fetch('/api/gold_standard', {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url }),
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok || payload.status !== 'ok') {
+                        throw new Error(payload.detail || payload.error || 'Eliminazione non riuscita');
+                    }
+                    if (editingUrl === url) {
+                        gsForm.reset();
+                        clearEditingState();
+                    }
+                    await loadEntries(domainSelect.value);
+                } catch (err) {
+                    console.error(err);
+                    alert(`Errore durante l'eliminazione: ${err.message}`);
+                } finally {
+                    deleteSelectedBtn.disabled = false;
+                }
+            });
+
+            resetButton.addEventListener('click', () => {
+                clearEditingState();
+            });
+
+            domainSelect.addEventListener('change', async () => {
+                clearEditingState();
+                await loadEntries(domainSelect.value);
+            });
+
+            searchInput.addEventListener('input', renderTable);
+
+            const params = new URLSearchParams(window.location.search);
+            const initialDomain = params.get('domain');
+            const initialUrl = params.get('url');
+
+            if (initialDomain && Array.from(domainSelect.options).some((option) => option.value === initialDomain)) {
+                domainSelect.value = initialDomain;
+            }
+
+            if (initialUrl) {
+                urlInput.value = initialUrl;
+                fetch(`/api/gold_standard?url=${encodeURIComponent(initialUrl)}`, {
+                    headers: { Accept: 'application/json' },
+                })
+                    .then((response) => response.json().catch(() => ({})).then((payload) => ({ response, payload })))
+                    .then(({ response, payload }) => {
+                        if (response.ok && payload) {
+                            fillForm(payload);
+                        }
+                    })
+                    .catch((error) => console.error(error))
+                    .finally(() => loadEntries(domainSelect.value));
+            } else {
+                loadEntries(domainSelect.value);
+            }
+
+            setSubmitState();
+        });
+    </script>
+
+</body>
+</html>

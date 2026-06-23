@@ -1,0 +1,35 @@
+# Utilizziamo una versione slim per ridurre le dimensioni dell'immagine
+FROM python:3.10-slim
+
+# Evita la generazione dei file .pyc e assicura che i log siano visibili in tempo reale
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Installiamo le dipendenze di sistema minime
+# 'build-essential' serve se alcune librerie devono compilare estensioni in C
+# 'curl' è utile per i futuri healthcheck del container
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiamo solo il file dei requisiti per sfruttare la cache dei layer di Docker
+COPY requirements.txt .
+
+# Installiamo le librerie Python
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copiamo il resto del codice dell'applicazione
+COPY . .
+
+RUN chmod +x /app/entrypoint.sh
+
+# Esponiamo la porta per FastAPI
+EXPOSE 5000
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+# Comando per avviare l'applicazione con Uvicorn
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "5000"]
