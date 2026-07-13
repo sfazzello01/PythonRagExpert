@@ -1,6 +1,8 @@
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: dockerfile
     ports:
       - "8003:8003"
     container_name: backend
@@ -18,16 +20,20 @@ services:
       - MYSQL_HOST=database
   
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: dockerfile
     ports:
       - "8004:8004"
     container_name: frontend
     depends_on:
       - backend
+      - esperto
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
       - BACKEND_URL=http://backend:8003
+      - ESPERTO_URL=http://esperto:5000
 
   database:
     image: mariadb:latest
@@ -55,13 +61,13 @@ services:
     volumes:
       - ./ollama_data:/root/.ollama
     #----per gpu NVIDIA---, eliminare se non si ha scheda NVIDIA#
-    # deploy:
-    #  resources:
-    #    reservations:
-    #     devices:
-    #        - driver: nvidia
-    #          count: 1 
-    #          capabilities: [gpu]
+    deploy:
+     resources:
+       reservations:
+        devices:
+           - driver: nvidia
+             count: 1 
+             capabilities: [gpu]
     #----per gpu NVIDIA---, eliminare se non si ha scheda NVIDIA#
     entrypoint: /bin/sh -c "ollama serve"
 
@@ -75,7 +81,6 @@ services:
     environment:
       - ADMINER_DEFAULT_SERVER=database
 
-
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
@@ -84,7 +89,9 @@ services:
       - ./qdrant_data:/qdrant/storage
 
   esperto:
-    build: ./esperto
+    build:
+      context: ./esperto
+      dockerfile: dockerfile
     container_name: esperto
     ports:
       - "5000:5000"

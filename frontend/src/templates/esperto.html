@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <title>Codebase Expert</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+</head>
+
+<body class="dark-theme">
+
+<header>
+
+    <a href="/" class="link-header-style">
+        ⬅ Home Progetto
+    </a>
+
+    <div class="system-status">
+        <span>Backend:
+            <strong class="{{ status.backend }}">
+                {{ status.backend }}
+            </strong>
+        </span>
+
+        <span>DB:
+            <strong class="{{ status.database }}">
+                {{ status.database }}
+            </strong>
+        </span>
+
+        <span>Ollama:
+            <strong class="{{ status.ollama }}">
+                {{ status.ollama }}
+            </strong>
+        </span>
+    </div>
+
+</header>
+
+
+<main class="container">
+
+    <h2>Codebase Expert</h2>
+
+    <form id="expert-form" class="card main-form" autocomplete="off">
+
+        <div class="form-group">
+
+            <label for="question">
+                Domanda
+            </label>
+
+            <textarea
+                    id="question"
+                    name="question"
+                    rows="5"
+                    placeholder="Scrivi qui la tua domanda sulla codebase"
+                    autocomplete="off"
+                    required></textarea>
+
+        </div>
+
+        <div class="form-row">
+
+            <button
+                    type="submit"
+                    class="btn-primary">
+
+                Chiedi all'esperto
+
+            </button>
+
+        </div>
+
+    </form>
+
+
+    <div class="results-grid">
+
+        <section class="card result-text">
+
+            <h3>Risposta</h3>
+
+            <div
+                    id="answer"
+                    class="scroll-box markdown-content">
+
+                Fai una domanda alla codebase.
+
+            </div>
+
+        </section>
+
+
+        <section class="card result-eval">
+
+            <h3>Informazioni</h3>
+
+            <div class="metrics">
+
+                <div class="metric-item">
+
+                    <span>Stato</span>
+
+                    <strong id="status">
+
+                        Pronto
+
+                    </strong>
+
+                </div>
+
+            </div>
+
+        </section>
+
+    </div>
+
+</main>
+
+
+<script>
+
+document.addEventListener("DOMContentLoaded", () => {
+
+    const form = document.getElementById("expert-form");
+
+    const textarea = document.getElementById("question");
+
+    const answer = document.getElementById("answer");
+
+    const status = document.getElementById("status");
+
+    const button = form.querySelector("button");
+
+    function renderMarkdown(text){
+
+        if(window.marked){
+
+            const html = marked.parse(text, {
+                breaks:true,
+                mangle:false,
+                headerIds:false
+            });
+
+            answer.innerHTML =
+                window.DOMPurify
+                    ? DOMPurify.sanitize(html)
+                    : html;
+
+        }else{
+
+            answer.textContent = text;
+
+        }
+
+    }
+
+    form.addEventListener("submit", async (e)=>{
+
+        e.preventDefault();
+
+        const question = textarea.value.trim();
+
+        if(!question){
+
+            answer.textContent = "Scrivi una domanda prima di inviare.";
+
+            status.textContent = "Pronto";
+
+            textarea.focus();
+
+            return;
+
+        }
+
+        button.disabled = true;
+
+        button.textContent = "Sto pensando...";
+
+        status.textContent = "Generazione";
+
+        answer.textContent = "";
+
+        try{
+
+            const response = await fetch("/ask",{
+
+                method:"POST",
+
+                headers:{
+                    "Content-Type":"application/json"
+                },
+
+                body:JSON.stringify({
+
+                    message:question
+
+                })
+
+            });
+
+            if(!response.ok){
+
+                const errorText = await response.text();
+
+                throw new Error(errorText || "Errore nella richiesta");
+
+            }
+
+            const reader = response.body.getReader();
+
+            const decoder = new TextDecoder();
+
+            let fullText = "";
+
+            while(true){
+
+                const {done,value} = await reader.read();
+
+                if(done)
+                    break;
+
+                fullText += decoder.decode(value);
+
+                renderMarkdown(fullText);
+
+                answer.scrollTop = answer.scrollHeight;
+
+            }
+
+            status.textContent = "Completata";
+
+        }
+
+        catch(err){
+
+            console.error(err);
+
+            answer.textContent = err.message;
+
+            status.textContent = "Errore";
+
+        }
+
+        finally{
+
+            button.disabled = false;
+
+            button.textContent = "Chiedi all'esperto";
+
+        }
+
+    });
+
+});
+
+</script>
+
+</body>
+</html>

@@ -7,7 +7,17 @@ from typing import AsyncIterator
 import asyncio
 
 from .nomic_conf import NomicOllamaEmbeddings, sanitize_text
-from config import EMBEDDING_MODEL, OLLAMA_URL, QDRANT_HOST, LLM_MODEL, TEMPERATURE, K
+from config import (
+    EMBEDDING_MODEL,
+    K,
+    LLM_MODEL,
+    OLLAMA_URL,
+    QDRANT_COLLECTION,
+    QDRANT_HOST,
+    TEMPERATURE,
+)
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.runnables import Runnable
 
 _chain = None  # global variable per la catena RAG, inizializzata on demand
 _retriever = None  # global variable per il retriever, inizializzata on demand
@@ -24,7 +34,9 @@ Regole:
 2. Rispondi in modo corretto e completo, ma solo se il codice fornito supporta la risposta.
 3. Se il codice è insufficiente per rispondere, ammettilo chiaramente ("Non lo so" o simile).
 4. Se proponi modifiche, mostra chiaramente il "Prima" e il "Dopo".
-5. mostra sempre le fonti del tuo ragionamento, indicando le funzioni specifiche che stai usando per rispondere.
+5. Mostra sempre le fonti del tuo ragionamento, indicando file, funzioni, classi, endpoint o template specifici quando sono presenti nel contesto.
+6. Quando la domanda chiede "come funziona" qualcosa, spiega il flusso operativo completo usando solo i passaggi supportati dai frammenti recuperati.
+7. Usa la mappa della codebase recuperata per orientarti tra moduli, funzioni, classi, route e template prima di concludere che il contesto è insufficiente.
 
 CONTESTO RECUPERATO:
 {context}
@@ -35,36 +47,41 @@ RISPOSTA ESPERTA:"""
     return template
 
 
-def _build_retriever() -> QdrantVectorStore.as_retriever:
+def _build_retriever() -> BaseRetriever:
     """
     Costruisce il retriever per la ricerca di documenti.
 
     return:
-        QdrantVectorStore.as_retriever: Un retriever configurato per cercare nei documenti indicizzati.
+        BaseRetriever: Un retriever configurato per cercare nei documenti indicizzati.
     """
     # 1. Connessione a Qdrant e setup del Retriever
     embeddings = NomicOllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_URL)
 
     vectorstore = QdrantVectorStore.from_existing_collection(
         embedding=embeddings,
-        collection_name="codebase_expert",
+        collection_name=QDRANT_COLLECTION,
         url=f"http://{QDRANT_HOST}:6333",
     )
 
     # 2. Configurazione del Retriever (cerca i k pezzi di codice più rilevanti)
     return vectorstore.as_retriever(
-        search_kwargs={"k": K}  # da finetunare
+        search_type="mmr",
+        search_kwargs={
+            "k": K,
+            "fetch_k": max(K * 4, 30),
+            "lambda_mult": 0.5,
+        },
     )
 
 
 def _build_rag_chain(
     retriever,
-) -> RunnablePassthrough | ChatPromptTemplate | ChatOllama | StrOutputParser:
+) -> Runnable:
     """
     Costruisce la catena RAG (Retrieval-Augmented Generation).
 
     args:
-        retriever (QdrantVectorStore.as_retriever): Il retriever per la ricerca di documenti.
+        retriever (BaseRetriever): Il retriever per la ricerca di documenti.
 
     returns:
         Runnable: La catena RAG configurata.
@@ -78,6 +95,34 @@ def _build_rag_chain(
     llm = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_URL, temperature=TEMPERATURE)
 
     # 5. La Catena RAG (LCEL - LangChain Expression Language)
+    def expand_queries(question: str) -> list[str]:
+        cleaned = sanitize_text(question).strip()
+        if not cleaned:
+            return []
+
+        return [
+            cleaned,
+            f"{cleaned} implementazione codice funzione classe modulo file",
+            f"{cleaned} flusso architettura dipendenze input output configurazione",
+        ]
+
+    def retrieve_docs(question: str):
+        docs = []
+        seen: set[tuple[str, str]] = set()
+
+        for query in expand_queries(question):
+            for doc in retriever.invoke(sanitize_text(query)):
+                key = (
+                    str(doc.metadata.get("filename", "")),
+                    doc.page_content[:300],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                docs.append(doc)
+
+        return docs[: max(K * 2, K)]
+
     def format_docs(docs):
         # Uniamo il contenuto dei file e aggiungiamo i metadati per aiutare il modello
         formatted = []
@@ -86,20 +131,23 @@ def _build_rag_chain(
             formatted.append(f"{header}\n{doc.page_content}")
         return "\n\n".join(formatted)
 
+    def retrieve_context(question: str) -> str:
+        return format_docs(retrieve_docs(question))
+
     return (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        {"context": retrieve_context, "question": RunnablePassthrough()}
         | prompt
         | llm
         | StrOutputParser()
     )
 
 
-def _get_retriever() -> QdrantVectorStore.as_retriever:
+def _get_retriever() -> BaseRetriever:
     """
     Restituisce il retriever per la ricerca di documenti.
 
     returns:
-        QdrantVectorStore.as_retriever: Un retriever configurato per cercare nei documenti indicizzati.
+        BaseRetriever: Un retriever configurato per cercare nei documenti indicizzati.
     """
     global _retriever
     if _retriever is None:
@@ -108,7 +156,7 @@ def _get_retriever() -> QdrantVectorStore.as_retriever:
 
 
 def _get_chain() -> (
-    RunnablePassthrough | ChatPromptTemplate | ChatOllama | StrOutputParser
+    Runnable
 ):
     """
     Restituisce la catena RAG (Retrieval-Augmented Generation) per generare risposte basate sui documenti recuperati.
@@ -132,9 +180,15 @@ async def stream_expert_response(user_query: str) -> AsyncIterator[str]:
     yields:
         str: La risposta generata dall'esperto, restituita in streaming.
     """
-    async for chunk in _get_chain().astream(sanitize_text(user_query)):
-        if chunk is not None:
-            yield str(chunk)
+    try:
+        async for chunk in _get_chain().astream(sanitize_text(user_query)):
+            if chunk is not None:
+                yield str(chunk)
+    except Exception as e:
+        yield (
+            "Errore durante la generazione della risposta dell'esperto: "
+            f"{type(e).__name__}: {e}"
+        )
 
 
 async def get_expert_response(user_query: str) -> str:
