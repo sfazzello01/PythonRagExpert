@@ -312,6 +312,11 @@ def build_index() -> None:
         f"Indicizzazione completata: {len(documents)} file, {len(chunks)} chunk",
         flush=True,
     )
+    
+    # Crea file flag per indicare che l'indicizzazione è completata
+    flag_file = BASE_DIR / ".index_complete"
+    flag_file.touch()
+    print(f"Creato flag file: {flag_file}", flush=True)
 
 
 if __name__ == "__main__":

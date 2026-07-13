@@ -31,12 +31,14 @@ Le risposte devono essere tecniche, precise e basate esclusivamente sul codice f
 
 Regole:
 1. Identifica prima quali file sono coinvolti nella richiesta.
-2. Rispondi in modo corretto e completo, ma solo se il codice fornito supporta la risposta.
-3. Se il codice è insufficiente per rispondere, ammettilo chiaramente ("Non lo so" o simile).
-4. Se proponi modifiche, mostra chiaramente il "Prima" e il "Dopo".
-5. Mostra sempre le fonti del tuo ragionamento, indicando file, funzioni, classi, endpoint o template specifici quando sono presenti nel contesto.
-6. Quando la domanda chiede "come funziona" qualcosa, spiega il flusso operativo completo usando solo i passaggi supportati dai frammenti recuperati.
-7. Usa la mappa della codebase recuperata per orientarti tra moduli, funzioni, classi, route e template prima di concludere che il contesto è insufficiente.
+2. Verifica la coerenza dei frammenti di codice recuperati: se un frammento sembra incompleto o tagliato, non usarlo per deduzioni critiche.
+3. Rispondi in modo corretto e completo, ma solo se il codice fornito supporta la risposta.
+4. Se il codice è insufficiente per rispondere, ammettilo chiaramente ("Non lo so" o simile).
+5. Se proponi modifiche, mostra chiaramente il "Prima" e il "Dopo".
+6. Mostra sempre le fonti del tuo ragionamento, indicando file, funzioni, classi, endpoint o template specifici quando sono presenti nel contesto.
+7. Quando la domanda chiede "come funziona" qualcosa, spiega il flusso operativo completo usando solo i passaggi supportati dai frammenti recuperati.
+8. Usa la mappa della codebase recuperata per orientarti tra moduli, funzioni, classi, route e template prima di concludere che il contesto è insufficiente.
+9. Se i frammenti recuperati contengono solo parti di funzioni o classi senza contesto sufficiente, specifica questa limitazione nella risposta.
 
 CONTESTO RECUPERATO:
 {context}
@@ -69,7 +71,7 @@ def _build_retriever() -> BaseRetriever:
         search_kwargs={
             "k": K,
             "fetch_k": max(K * 4, 30),
-            "lambda_mult": 0.5,
+            "lambda_mult": 0.7,  # aumentato per favorire rilevanza rispetto a diversità
         },
     )
 
@@ -95,15 +97,30 @@ def _build_rag_chain(
     llm = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_URL, temperature=TEMPERATURE)
 
     # 5. La Catena RAG (LCEL - LangChain Expression Language)
+    def is_general_question(question: str) -> bool:
+        """Rileva se la domanda è generale (richiede overview/architettura)."""
+        general_keywords = [
+            "come funziona", "come lavora", "come opera",
+            "overview", "architettura", "flusso", "flow",
+            "struttura", "design", "sistema", "system",
+            "funzionamento generale", "visione d'insieme"
+        ]
+        question_lower = question.lower()
+        return any(keyword in question_lower for keyword in general_keywords)
+
     def expand_queries(question: str) -> list[str]:
         cleaned = sanitize_text(question).strip()
         if not cleaned:
             return []
 
+        # Query expansion più specifica e mirata al dominio
         return [
             cleaned,
-            f"{cleaned} implementazione codice funzione classe modulo file",
-            f"{cleaned} flusso architettura dipendenze input output configurazione",
+            f"{cleaned} implementation code function class module",
+            f"{cleaned} architecture flow dependencies parameters return",
+            f"{cleaned} endpoint route api handler",
+            f"{cleaned} overview system design structure",
+            f"{cleaned} how works process logic algorithm",
         ]
 
     def retrieve_docs(question: str):
@@ -120,6 +137,39 @@ def _build_rag_chain(
                     continue
                 seen.add(key)
                 docs.append(doc)
+                
+                # Parent document retrieval: se recuperiamo un chunk, aggiungiamo anche altri chunk dello stesso file
+                filename = str(doc.metadata.get("filename", ""))
+                if filename and filename not in files_seen:
+                    files_seen.add(filename)
+                    # Recupera altri documenti dallo stesso file per contesto più ampio
+                    try:
+                        from qdrant_client import QdrantClient
+                        client = QdrantClient(url=f"http://{QDRANT_HOST}:6333")
+                        collection_info = client.get_collection(QDRANT_COLLECTION)
+                        # Filtra per filename nei metadati
+                        from qdrant_client.models import Filter, FieldCondition, MatchValue
+                        same_file_docs = retriever.invoke(
+                            sanitize_text(query),
+                            filter=Filter(
+                                must=[
+                                    FieldCondition(
+                                        key="metadata.filename",
+                                        match=MatchValue(value=filename)
+                                    )
+                                ]
+                            )
+                        )
+                        for same_doc in same_file_docs:
+                            same_key = (
+                                str(same_doc.metadata.get("filename", "")),
+                                same_doc.page_content[:300],
+                            )
+                            if same_key not in seen:
+                                seen.add(same_key)
+                                docs.append(same_doc)
+                    except Exception:
+                        pass  # Se fallisce, continuiamo con i documenti recuperati
 
         return docs[: max(K * 2, K)]
 

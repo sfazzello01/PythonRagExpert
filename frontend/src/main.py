@@ -197,12 +197,14 @@ def fetch_status() -> dict[str, str]:
             "backend": "error",
             "database": "error",
             "ollama": "error",
+            "esperto": "error",
         }
 
     return {
         "backend": str(data.get("backend", "error")),
         "database": str(data.get("database", "error")),
         "ollama": str(data.get("ollama", "error")),
+        "esperto": str(data.get("esperto", "error")),
     }
 
 
@@ -385,6 +387,7 @@ def api_status():
                 "backend": "error",
                 "database": "error",
                 "ollama": "error",
+                "esperto": "error",
             },
         )
 

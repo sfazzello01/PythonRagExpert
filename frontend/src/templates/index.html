@@ -35,6 +35,13 @@
                     {{ status.ollama | default('Attivo') }}
                 </strong>
             </span>
+
+            <span>
+                Esperto:
+                <strong class="{{ status.esperto | default('error') }}">
+                    {{ status.esperto | default('error') }}
+                </strong>
+            </span>
         </div>
     </header>
 

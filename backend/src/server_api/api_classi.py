@@ -89,3 +89,4 @@ class StatusResponce(BaseModel):
     backend: str
     database: str
     ollama: str
+    esperto: str
