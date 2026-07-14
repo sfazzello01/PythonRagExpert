@@ -105,5 +105,6 @@ services:
       - ./domains.json:/app/domains.json:ro
       - ./docker-compose.yaml:/app/docker-compose.yaml:ro
     environment:
+      - LLM_MODEL=${LLM_MODEL:-llama3.5b}
       - OLLAMA_HOST=http://ollama:11434
       - QDRANT_HOST=qdrant

@@ -1,3 +1,4 @@
+# indicizzatore.py
 from __future__ import annotations
 
 import time
@@ -108,7 +109,7 @@ def _load_documents() -> list[Document]:
             continue
 
         if len(text) > INDEX_MAX_FILE_CHARS:
-            text = text[:INDEX_MAX_FILE_CHARS]
+            print(f"[⚠️ WARNING] Il file {path} supera INDEX_MAX_FILE_CHARS ({len(text)} caratteri). Verrà diviso dallo splitter.", flush=True)
 
         relative_path = str(path.relative_to(BASE_DIR))
         service = _service_for_path(path)
@@ -216,22 +217,47 @@ def _extract_frontend_fetches(path: Path) -> list[str]:
         return []
 
     fetches: list[str] = []
-    for match in re.finditer(r"fetch\(([^,\n)]+)", text):
-        endpoint = match.group(1).strip()
+    for match in re.finditer(r"fetch\s*\(\s*([^,\n)]+)", text):
+        endpoint = match.group(1).strip().strip("'`\"")
         line = text.count("\n", 0, match.start()) + 1
         fetches.append(f"linea {line}: fetch({endpoint})")
 
     return fetches
 
 
+def _generate_target_tree(path: Path, prefix: str = "") -> list[str]:
+    lines: list[str] = []
+    try:
+        items = sorted(
+            [item for item in path.iterdir() if item.name not in SKIP_DIRS],
+            key=lambda x: (not x.is_dir(), x.name.lower())
+        )
+        for i, item in enumerate(items):
+            is_last = (i == len(items) - 1)
+            connector = "└── " if is_last else "├── "
+            if item.is_dir():
+                lines.append(f"{prefix}{connector}{item.name}/")
+                new_prefix = prefix + ("    " if is_last else "│   ")
+                lines.extend(_generate_target_tree(item, new_prefix))
+            elif item.suffix in SUPPORTED_EXTENSIONS or item.name in ["docker-compose.yaml", "domains.json"]:
+                lines.append(f"{prefix}{connector}{item.name}")
+    except OSError:
+        pass
+    return lines
+
+
 def _build_codebase_summary_documents() -> list[Document]:
     sections: list[str] = []
+    total_python_files = 0
+    total_routes = 0
+    total_fetches = 0
 
     for path in _iter_source_files():
         relative_path = str(path.relative_to(BASE_DIR))
         details: list[str] = []
 
         if path.suffix == ".py":
+            total_python_files += 1
             symbols = _extract_python_symbols(path)
             routes = _extract_fastapi_routes(path)
 
@@ -242,28 +268,71 @@ def _build_codebase_summary_documents() -> list[Document]:
             if routes:
                 details.append("ROUTE FASTAPI:")
                 details.extend(routes)
+                total_routes += len(routes)
 
         if path.suffix in {".html", ".py"}:
             fetches = _extract_frontend_fetches(path)
             if fetches:
                 details.append("CHIAMATE HTTP/FETCH:")
                 details.extend(fetches)
+                total_fetches += len(fetches)
 
         if details:
             sections.append(f"FILE: {relative_path}\n" + "\n".join(details))
 
-    if not sections:
+    tree_lines: list[str] = []
+    for target in INDEX_TARGETS:
+        if not target.exists():
+            continue
+        if target.is_file():
+            tree_lines.append(f"└── {target.name}")
+        else:
+            tree_lines.append(f"└── {target.name}/")
+            tree_lines.extend(_generate_target_tree(target, "    "))
+    
+    dir_tree_text = "\n".join(tree_lines)
+
+    tech_stack_details: list[str] = []
+    docker_compose_path = BASE_DIR / "docker-compose.yaml"
+    if docker_compose_path.exists():
+        try:
+            content = docker_compose_path.read_text(encoding="utf-8", errors="ignore")
+            services = re.findall(r"^\s{2}(\w+):", content, re.MULTILINE)
+            if services:
+                tech_stack_details.append(f"- Container/Servizi Docker attivi: {', '.join(services)}")
+        except Exception:
+            pass
+
+    domains_path = BASE_DIR / "domains.json"
+    if domains_path.exists():
+        tech_stack_details.append("- Mappa dei domini applicativi configurata in `domains.json`.")
+
+    tech_stack_text = "\n".join(tech_stack_details) if tech_stack_details else "- Configurazione standard locale."
+
+    overview_header = (
+        "==================================================================\n"
+        "             OVERVIEW GENERALE DELLA ARCHITETTURA RAG\n"
+        "==================================================================\n\n"
+        "1. SERVIZI E INFRASTRUTTURA:\n"
+        f"{tech_stack_text}\n\n"
+        "2. METRICHE CHIAVE DEL PROGETTO:\n"
+        f"- File totali sotto tracciamento: {len(_iter_source_files())}\n"
+        f"- Moduli Python (.py): {total_python_files}\n"
+        f"- Endpoint API (FastAPI) esposti: {total_routes}\n"
+        f"- Chiamate API (Fetch) lato frontend: {total_fetches}\n\n"
+        "3. STRUTTURA DELLE CARTELLE (ALBERO LOGICO):\n"
+        f"{dir_tree_text}\n\n"
+        "==================================================================\n"
+        "                 MAPPA DETTAGLIATA DEI SINGOLI FILE\n"
+        "==================================================================\n"
+    )
+
+    if not sections and not tree_lines:
         return []
 
     return [
         Document(
-            page_content=(
-                "MAPPA GENERALE DELLA CODEBASE\n"
-                "Questo documento sintetico collega file, moduli, funzioni, "
-                "classi, route FastAPI e chiamate HTTP/fetch. Serve come indice "
-                "di orientamento per qualunque domanda sulla codebase.\n\n"
-                + "\n\n".join(sections)
-            ),
+            page_content=overview_header + "\n\n" + "\n\n".join(sections),
             metadata={
                 "filename": "__codebase_map__",
                 "service": "architecture",
@@ -300,20 +369,13 @@ def build_index() -> None:
             break
         except Exception as exc:
             last_error = exc
-            print(
-                f"Indicizzazione non pronta, tentativo {attempt}/30: {exc}",
-                flush=True,
-            )
+            print(f"Indicizzazione non pronta, tentativo {attempt}/30: {exc}", flush=True)
             time.sleep(5)
     else:
         raise RuntimeError(f"Indicizzazione fallita: {last_error}")
 
-    print(
-        f"Indicizzazione completata: {len(documents)} file, {len(chunks)} chunk",
-        flush=True,
-    )
+    print(f"Indicizzazione completata: {len(documents)} file, {len(chunks)} chunk", flush=True)
     
-    # Crea file flag per indicare che l'indicizzazione è completata
     flag_file = BASE_DIR / ".index_complete"
     flag_file.touch()
     print(f"Creato flag file: {flag_file}", flush=True)
