@@ -1,30 +1,52 @@
-# indicizzatore.py
 from __future__ import annotations
 
-import time
-from pathlib import Path
-import ast
+import os
 import re
+import ast
+import time
+import uuid
+import hashlib
+import logging
+from pathlib import Path
+from typing import List, Dict, Any
 
-from langchain_core.documents import Document  # type: ignore
-from langchain_qdrant import QdrantVectorStore  # type: ignore
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
-from qdrant_client import QdrantClient  # type: ignore
-
-from config import (
-    EMBEDDING_MODEL,
-    INDEX_CHUNK_OVERLAP,
-    INDEX_CHUNK_SIZE,
-    INDEX_MAX_FILE_CHARS,
-    OLLAMA_URL,
-    QDRANT_COLLECTION,
-    QDRANT_HOST,
-    SUPPORTED_EXTENSIONS,
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import (
+    Distance,
+    VectorParams,
+    SparseVectorParams,
+    SparseVector,
+    PointStruct,
+    MultiVectorConfig,
+    MultiVectorComparator,
 )
-from .nomic_conf import NomicOllamaEmbeddings, sanitize_text
+from FlagEmbedding import BGEM3FlagModel
 
+# =====================================================================
+# CONFIGURAZIONE E VARIABILI D'AMBIENTE
+# =====================================================================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("EspertoSOTA")
 
-BASE_DIR = Path("/app")
+BASE_DIR = Path(os.getenv("BASE_DIR", "/app"))
+QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "codebase_knowledge")
+
+# Modello BGE-M3 unificato (PyTorch via FlagEmbedding, non ONNX/fastembed):
+# un solo forward pass produce dense + sparse (lexical_weights) + ColBERT (multi-vettore)
+DENSE_MODEL_NAME = "BAAI/bge-m3"
+DENSE_DIM = 1024
+BGE_M3_USE_FP16 = os.getenv("BGE_M3_USE_FP16", "false").lower() == "true"  # utile solo su GPU
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "30"))
+
+SUPPORTED_EXTENSIONS = {".py", ".json", ".yaml", ".yml", ".md", ".txt", ".html", ".ts", ".js"}
+SKIP_DIRS = {
+    "__pycache__", ".git", ".pytest_cache", ".mypy_cache", "logs", 
+    "mariadb_data", "ollama_data", "qdrant_data", "node_modules", "dist", "build"
+}
 INDEX_TARGETS = (
     BASE_DIR / "backend",
     BASE_DIR / "frontend",
@@ -33,181 +55,137 @@ INDEX_TARGETS = (
     BASE_DIR / "domains.json",
     BASE_DIR / "docker-compose.yaml",
 )
-SKIP_DIRS = {
-    "__pycache__",
-    ".git",
-    ".pytest_cache",
-    ".mypy_cache",
-    "logs",
-    "mariadb_data",
-    "ollama_data",
-    "qdrant_data",
-    "node_modules",
-}
 
 
-def _wait_for_qdrant() -> None:
-    client = QdrantClient(url=f"http://{QDRANT_HOST}:6333")
-    last_error: Exception | None = None
+# =====================================================================
+# 1. FUNZIONAMENTO AST CHUNKER & CONTEXTUAL ENRICHMENT
+# =====================================================================
+class PythonASTContextualChunker:
+    """Estrae funzioni e classi da codice Python, iniettando nel contesto
 
-    for _ in range(30):
+    gli import del modulo, le route FastAPI e le firme dei decoratori.
+    """
+    def __init__(self, file_path: Path, code: str):
+        self.file_path = file_path
+        self.relative_path = str(file_path.relative_to(BASE_DIR)) if BASE_DIR in file_path.parents else str(file_path)
+        self.code = code
+        self.lines = code.splitlines(keepends=True)
+
+    def extract_chunks(self) -> List[Document]:
+        documents = []
         try:
-            client.get_collections()
-            return
-        except Exception as exc:
-            last_error = exc
-            time.sleep(2)
+            tree = ast.parse(self.code)
+        except SyntaxError as e:
+            logger.warning(f"⚠️ Errore sintassi in {self.relative_path}: {e}. Fallback su splitter grezzo.")
+            return _fallback_text_split(self.file_path, self.code, language="python")
 
-    raise RuntimeError(f"Qdrant non disponibile: {last_error}")
+        # Estrazione contesto globale del modulo
+        imports = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        imports_context = "\n".join(imports) + "\n\n" if imports else ""
+        processed_lines = set()
 
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                start = node.lineno - 1
+                end = node.end_lineno
+                for l in range(start, end):
+                    processed_lines.add(l)
 
-def _iter_source_files() -> list[Path]:
-    files: list[Path] = []
+                raw_code = "".join(self.lines[start:end])
+                chunk_type = "class" if isinstance(node, ast.ClassDef) else "function"
+                
+                # Identificazione route FastAPI
+                route_meta = ""
+                for dec in getattr(node, "decorator_list", []):
+                    dec_str = ast.unparse(dec)
+                    if any(m in dec_str for m in ["get(", "post(", "put(", "delete(", "patch("]):
+                        route_meta = f"# ENDPOINT API: {dec_str}\n"
 
-    for target in INDEX_TARGETS:
-        if target.is_file():
-            if target.suffix in SUPPORTED_EXTENSIONS:
-                files.append(target)
-            continue
+                # CONTEXTUAL RETRIEVAL: Prepariamo un'intestazione ricca per il modello bge-m3
+                enrichment_header = (
+                    f"# FILE: {self.relative_path} | SERVIZIO: {_service_for_path(self.file_path)}\n"
+                    f"# TIPO: {chunk_type.upper()} | NOME: {node.name}\n"
+                    f"{route_meta}"
+                    f"--- IMPORTS DI CONTESTO ---\n{imports_context}"
+                    f"--- CODICE SORGENTE ---\n"
+                )
 
-        if not target.is_dir():
-            continue
+                content = enrichment_header + raw_code
+                doc_id = hashlib.md5(f"{self.relative_path}::{node.name}::{start}::{end}".encode('utf-8')).hexdigest()
 
-        for path in target.rglob("*"):
-            if not path.is_file():
-                continue
-            if any(part in SKIP_DIRS for part in path.parts):
-                continue
-            if path.suffix not in SUPPORTED_EXTENSIONS:
-                continue
-            files.append(path)
+                documents.append(Document(
+                    page_content=content,
+                    metadata={
+                        "filename": self.relative_path,
+                        "service": _service_for_path(self.file_path),
+                        "chunk_type": chunk_type,
+                        "symbol_name": node.name,
+                        "start_line": node.lineno,
+                        "end_line": node.end_lineno,
+                        "chunk_id": doc_id
+                    }
+                ))
 
-    return sorted(files)
-
-
-def _service_for_path(path: Path) -> str:
-    try:
-        relative = path.relative_to(BASE_DIR)
-    except ValueError:
-        return "root"
-
-    return relative.parts[0] if relative.parts else "root"
-
-
-def _load_documents() -> list[Document]:
-    documents: list[Document] = []
-
-    for path in _iter_source_files():
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError as exc:
-            print(f"Skip {path}: {exc}", flush=True)
-            continue
-
-        text = sanitize_text(text).strip()
-        if not text:
-            continue
-
-        if len(text) > INDEX_MAX_FILE_CHARS:
-            print(f"[⚠️ WARNING] Il file {path} supera INDEX_MAX_FILE_CHARS ({len(text)} caratteri). Verrà diviso dallo splitter.", flush=True)
-
-        relative_path = str(path.relative_to(BASE_DIR))
-        service = _service_for_path(path)
-        indexed_text = (
-            f"FILE: {relative_path}\n"
-            f"SERVIZIO: {service}\n"
-            f"ESTENSIONE: {path.suffix}\n\n"
-            f"{text}"
-        )
-
-        documents.append(
-            Document(
-                page_content=indexed_text,
+        # Cattura eventuale codice di primo livello (variabili globali, config, script)
+        global_lines = [self.lines[i] for i in range(len(self.lines)) if i not in processed_lines and self.lines[i].strip()]
+        if global_lines and len("".join(global_lines).strip()) > 50:
+            content = f"# FILE: {self.relative_path} (Global Body)\n\n" + "".join(global_lines)
+            doc_id = hashlib.md5(f"{self.relative_path}::global_body".encode('utf-8')).hexdigest()
+            documents.append(Document(
+                page_content=content,
                 metadata={
-                    "filename": relative_path,
-                    "service": service,
-                },
-            )
-        )
+                    "filename": self.relative_path,
+                    "service": _service_for_path(self.file_path),
+                    "chunk_type": "global_body",
+                    "symbol_name": "main_body",
+                    "chunk_id": doc_id
+                }
+            ))
 
-    documents.extend(_build_codebase_summary_documents())
-    return documents
-
-
-def _decorator_name(decorator: ast.expr) -> str | None:
-    target = decorator.func if isinstance(decorator, ast.Call) else decorator
-
-    if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-        return f"{target.value.id}.{target.attr}"
-
-    return None
+        return documents
 
 
+def _fallback_text_split(path: Path, text: str, language: str = "text") -> List[Document]:
+    """Splitter generico per file non-Python (YAML, Markdown, Frontend, JSON lunghi)."""
+    relative_path = str(path.relative_to(BASE_DIR)) if BASE_DIR in path.parents else str(path)
+    service = _service_for_path(path)
+    
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
+    raw_chunks = splitter.split_text(text)
+    
+    docs = []
+    for i, chunk in enumerate(raw_chunks):
+        content = f"# FILE: {relative_path} (Part {i+1}/{len(raw_chunks)}) | SERVIZIO: {service}\n\n{chunk}"
+        doc_id = hashlib.md5(f"{relative_path}::part_{i}".encode('utf-8')).hexdigest()
+        docs.append(Document(
+            page_content=content,
+            metadata={
+                "filename": relative_path,
+                "service": service,
+                "chunk_type": "text_block",
+                "symbol_name": f"part_{i+1}",
+                "chunk_id": doc_id
+            }
+        ))
+    return docs
+
+
+# =====================================================================
+# 2. GENERAZIONE DELLA MAPPA GLOBALE ARCHITETTURALE
+# =====================================================================
 def _extract_fastapi_routes(path: Path) -> list[str]:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
     except (OSError, SyntaxError):
         return []
-
-    routes: list[str] = []
+    routes = []
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-
-        for decorator in node.decorator_list:
-            name = _decorator_name(decorator)
-            if name not in {
-                "app.get",
-                "app.post",
-                "app.delete",
-                "app.put",
-                "app.patch",
-            }:
-                continue
-
-            if not isinstance(decorator, ast.Call) or not decorator.args:
-                continue
-
-            route_arg = decorator.args[0]
-            if not isinstance(route_arg, ast.Constant):
-                continue
-
-            route = str(route_arg.value)
-            method = name.split(".")[-1].upper()
-            routes.append(f"{method} {route} -> {node.name}()")
-
-    return routes
-
-
-def _extract_python_symbols(path: Path) -> list[str]:
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-    except (OSError, SyntaxError):
-        return []
-
-    symbols: list[str] = []
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            methods = [
-                item.name
-                for item in node.body
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ]
-            if methods:
-                symbols.append(f"classe {node.name} metodi: {', '.join(methods)}")
-            else:
-                symbols.append(f"classe {node.name}")
-
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            decorators = [
-                name
-                for decorator in node.decorator_list
-                if (name := _decorator_name(decorator))
-            ]
-            decorator_text = f" decoratori: {', '.join(decorators)}" if decorators else ""
-            symbols.append(f"funzione {node.name}{decorator_text}")
-
-    return symbols
+            for decorator in getattr(node, "decorator_list", []):
+                dec_str = ast.unparse(decorator)
+                if any(m in dec_str for m in ["get(", "post(", "put(", "delete(", "patch("]):
+                    routes.append(f"{dec_str} -> {node.name}()")
+    return routes
 
 
 def _extract_frontend_fetches(path: Path) -> list[str]:
@@ -215,30 +193,24 @@ def _extract_frontend_fetches(path: Path) -> list[str]:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return []
-
-    fetches: list[str] = []
+    fetches = []
     for match in re.finditer(r"fetch\s*\(\s*([^,\n)]+)", text):
         endpoint = match.group(1).strip().strip("'`\"")
         line = text.count("\n", 0, match.start()) + 1
         fetches.append(f"linea {line}: fetch({endpoint})")
-
     return fetches
 
 
 def _generate_target_tree(path: Path, prefix: str = "") -> list[str]:
-    lines: list[str] = []
+    lines = []
     try:
-        items = sorted(
-            [item for item in path.iterdir() if item.name not in SKIP_DIRS],
-            key=lambda x: (not x.is_dir(), x.name.lower())
-        )
+        items = sorted([i for i in path.iterdir() if i.name not in SKIP_DIRS], key=lambda x: (not x.is_dir(), x.name.lower()))
         for i, item in enumerate(items):
             is_last = (i == len(items) - 1)
             connector = "└── " if is_last else "├── "
             if item.is_dir():
                 lines.append(f"{prefix}{connector}{item.name}/")
-                new_prefix = prefix + ("    " if is_last else "│   ")
-                lines.extend(_generate_target_tree(item, new_prefix))
+                lines.extend(_generate_target_tree(item, prefix + ("    " if is_last else "│   ")))
             elif item.suffix in SUPPORTED_EXTENSIONS or item.name in ["docker-compose.yaml", "domains.json"]:
                 lines.append(f"{prefix}{connector}{item.name}")
     except OSError:
@@ -246,139 +218,227 @@ def _generate_target_tree(path: Path, prefix: str = "") -> list[str]:
     return lines
 
 
-def _build_codebase_summary_documents() -> list[Document]:
-    sections: list[str] = []
-    total_python_files = 0
-    total_routes = 0
-    total_fetches = 0
+def _build_codebase_summary_documents(all_files: List[Path]) -> list[Document]:
+    """Genera il documento di mappa globale '__codebase_map__' per le query architetturali."""
+    logger.info("🗺️ Generazione documento overview '__codebase_map__'")
+    sections = []
+    total_py, total_routes, total_fetches = 0, 0, 0
 
-    for path in _iter_source_files():
-        relative_path = str(path.relative_to(BASE_DIR))
-        details: list[str] = []
-
+    for path in all_files:
+        rel_path = str(path.relative_to(BASE_DIR)) if BASE_DIR in path.parents else str(path)
+        details = []
         if path.suffix == ".py":
-            total_python_files += 1
-            symbols = _extract_python_symbols(path)
+            total_py += 1
             routes = _extract_fastapi_routes(path)
-
-            if symbols:
-                details.append("SIMBOLI PYTHON:")
-                details.extend(symbols)
-
             if routes:
-                details.append("ROUTE FASTAPI:")
-                details.extend(routes)
+                details.append("ROUTE FASTAPI:\n  " + "\n  ".join(routes))
                 total_routes += len(routes)
-
-        if path.suffix in {".html", ".py"}:
+        if path.suffix in {".html", ".py", ".ts", ".js"}:
             fetches = _extract_frontend_fetches(path)
             if fetches:
-                details.append("CHIAMATE HTTP/FETCH:")
-                details.extend(fetches)
+                details.append("CHIAMATE HTTP/FETCH:\n  " + "\n  ".join(fetches))
                 total_fetches += len(fetches)
-
         if details:
-            sections.append(f"FILE: {relative_path}\n" + "\n".join(details))
+            sections.append(f"FILE: {rel_path}\n" + "\n".join(details))
 
-    tree_lines: list[str] = []
+    tree_lines = []
     for target in INDEX_TARGETS:
-        if not target.exists():
-            continue
-        if target.is_file():
-            tree_lines.append(f"└── {target.name}")
-        else:
-            tree_lines.append(f"└── {target.name}/")
-            tree_lines.extend(_generate_target_tree(target, "    "))
-    
-    dir_tree_text = "\n".join(tree_lines)
+        if target.exists():
+            tree_lines.append(f"└── {target.name}/" if target.is_dir() else f"└── {target.name}")
+            if target.is_dir():
+                tree_lines.extend(_generate_target_tree(target, "    "))
 
-    tech_stack_details: list[str] = []
-    docker_compose_path = BASE_DIR / "docker-compose.yaml"
-    if docker_compose_path.exists():
-        try:
-            content = docker_compose_path.read_text(encoding="utf-8", errors="ignore")
-            services = re.findall(r"^\s{2}(\w+):", content, re.MULTILINE)
-            if services:
-                tech_stack_details.append(f"- Container/Servizi Docker attivi: {', '.join(services)}")
-        except Exception:
-            pass
-
-    domains_path = BASE_DIR / "domains.json"
-    if domains_path.exists():
-        tech_stack_details.append("- Mappa dei domini applicativi configurata in `domains.json`.")
-
-    tech_stack_text = "\n".join(tech_stack_details) if tech_stack_details else "- Configurazione standard locale."
-
-    overview_header = (
+    overview_text = (
         "==================================================================\n"
         "             OVERVIEW GENERALE DELLA ARCHITETTURA RAG\n"
         "==================================================================\n\n"
-        "1. SERVIZI E INFRASTRUTTURA:\n"
-        f"{tech_stack_text}\n\n"
-        "2. METRICHE CHIAVE DEL PROGETTO:\n"
-        f"- File totali sotto tracciamento: {len(_iter_source_files())}\n"
-        f"- Moduli Python (.py): {total_python_files}\n"
-        f"- Endpoint API (FastAPI) esposti: {total_routes}\n"
-        f"- Chiamate API (Fetch) lato frontend: {total_fetches}\n\n"
-        "3. STRUTTURA DELLE CARTELLE (ALBERO LOGICO):\n"
-        f"{dir_tree_text}\n\n"
+        f"METRICHE CHIAVE:\n- File indicizzati: {len(all_files)}\n- Moduli Python: {total_py}\n"
+        f"- Endpoint API esposti: {total_routes}\n- Chiamate Fetch Frontend: {total_fetches}\n\n"
+        "ALBERO DELLE CARTELLE:\n" + "\n".join(tree_lines) + "\n\n"
         "==================================================================\n"
-        "                 MAPPA DETTAGLIATA DEI SINGOLI FILE\n"
-        "==================================================================\n"
+        "                 MAPPA ROUTE E CHIAMATE DEI FILE\n"
+        "==================================================================\n\n" +
+        "\n\n".join(sections)
     )
 
-    if not sections and not tree_lines:
-        return []
+    doc_id = hashlib.md5("global_codebase_map_sota".encode('utf-8')).hexdigest()
+    return [Document(
+        page_content=overview_text,
+        metadata={"filename": "__codebase_map__", "service": "architecture", "chunk_type": "architecture_map", "chunk_id": doc_id}
+    )]
 
-    return [
-        Document(
-            page_content=overview_header + "\n\n" + "\n\n".join(sections),
-            metadata={
-                "filename": "__codebase_map__",
-                "service": "architecture",
-            },
+
+# =====================================================================
+# 3. UTILITY DI SISTEMA E SCANSIONE
+# =====================================================================
+def _service_for_path(path: Path) -> str:
+    try:
+        rel = path.relative_to(BASE_DIR)
+        return rel.parts[0] if rel.parts else "root"
+    except ValueError:
+        return "root"
+
+
+def _iter_source_files() -> list[Path]:
+    files = []
+    for target in INDEX_TARGETS:
+        if target.is_file() and target.suffix in SUPPORTED_EXTENSIONS:
+            files.append(target)
+        elif target.is_dir():
+            for path in target.rglob("*"):
+                if path.is_file() and path.suffix in SUPPORTED_EXTENSIONS and not any(p in SKIP_DIRS for p in path.parts):
+                    files.append(path)
+    return sorted(files)
+
+
+def _wait_for_qdrant() -> QdrantClient:
+    url = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
+    logger.info(f"🔌 Connessione a Qdrant su {url}...")
+    client = QdrantClient(url=url)
+    for attempt in range(1, 31):
+        try:
+            client.get_collections()
+            logger.info("✅ Qdrant è online e risponde.")
+            return client
+        except Exception as e:
+            logger.warning(f"⏳ Attesa Qdrant (Tentativo {attempt}/30): {e}")
+            time.sleep(2)
+    raise RuntimeError("❌ Qdrant non disponibile dopo 60 secondi.")
+
+
+# =====================================================================
+# 4. ENGINE MOTORE IBRIDO QDRANT (DENSE + SPARSE + COLBERT, TUTTI DA BGE-M3)
+# =====================================================================
+def load_bge_m3_model() -> BGEM3FlagModel:
+    """Carica BGE-M3 in locale (PyTorch/FlagEmbedding).
+
+    A differenza di fastembed (ONNX), un solo forward pass restituisce
+    dense_vecs, lexical_weights (sparse) e colbert_vecs: qui sfruttiamo
+    davvero la natura "ibrida" del modello, non solo il suo embedding denso.
+    """
+    logger.info(f"🧠 Caricamento modello BGE-M3 unificato ({DENSE_MODEL_NAME}, fp16={BGE_M3_USE_FP16})...")
+    return BGEM3FlagModel(DENSE_MODEL_NAME, use_fp16=BGE_M3_USE_FP16)
+
+
+def ensure_hybrid_collection(client: QdrantClient) -> None:
+    """Crea la collection ibrida (dense + sparse + colbert multi-vector) se non esiste."""
+    if client.collection_exists(QDRANT_COLLECTION):
+        logger.info(f"📦 Collection '{QDRANT_COLLECTION}' trovata. Modalità aggiornamento incrementale.")
+        return
+
+    logger.info(f"✨ Creazione nuova collection ibrida '{QDRANT_COLLECTION}' (dense + sparse + colbert)...")
+    client.create_collection(
+        collection_name=QDRANT_COLLECTION,
+        vectors_config={
+            "dense": VectorParams(size=DENSE_DIM, distance=Distance.COSINE),
+            # ColBERT: un vettore per token, comparati con MaxSim invece di un singolo cosine
+            "colbert": VectorParams(
+                size=DENSE_DIM,
+                distance=Distance.COSINE,
+                multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
+            ),
+        },
+        sparse_vectors_config={"sparse": SparseVectorParams()},
+    )
+
+
+def _chunk_id_to_point_id(chunk_id: str) -> str:
+    """Converte l'MD5 esadecimale (32 char) già usato come chunk_id in un UUID valido per Qdrant.
+
+    Un digest MD5 ha esattamente la stessa lunghezza esadecimale di un UUID (32 char),
+    quindi la conversione è deterministica e biunivoca: stesso contenuto -> stesso ID,
+    preservando l'idempotenza dell'ingestione incrementale (niente force_recreate).
+    """
+    return str(uuid.UUID(hex=chunk_id))
+
+
+def _lexical_weights_to_sparse_vector(lexical_weights: Dict[str, float]) -> SparseVector:
+    if not lexical_weights:
+        return SparseVector(indices=[], values=[])
+    indices, values = zip(*((int(token_id), float(weight)) for token_id, weight in lexical_weights.items()))
+    return SparseVector(indices=list(indices), values=list(values))
+
+
+def encode_and_upsert_batch(model: BGEM3FlagModel, client: QdrantClient, batch: List[Document]) -> None:
+    """Genera dense+sparse+colbert per un batch di chunk in un solo forward pass e li carica su Qdrant."""
+    texts = [doc.page_content for doc in batch]
+
+    output = model.encode(
+        texts,
+        batch_size=len(texts),
+        max_length=8192,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=True,
+    )
+
+    points = []
+    for doc, dense_vec, lexical_weight, colbert_vec in zip(
+        batch, output["dense_vecs"], output["lexical_weights"], output["colbert_vecs"]
+    ):
+        points.append(
+            PointStruct(
+                id=_chunk_id_to_point_id(doc.metadata["chunk_id"]),
+                vector={
+                    "dense": dense_vec.tolist(),
+                    "sparse": _lexical_weights_to_sparse_vector(lexical_weight),
+                    "colbert": colbert_vec.tolist(),
+                },
+                payload={"page_content": doc.page_content, "metadata": doc.metadata},
+            )
         )
-    ]
+
+    client.upsert(collection_name=QDRANT_COLLECTION, points=points)
 
 
 def build_index() -> None:
-    _wait_for_qdrant()
+    """Funzione principale di orchestrazione della pipeline SOTA."""
+    start_time = time.time()
+    client = _wait_for_qdrant()
+    model = load_bge_m3_model()
+    ensure_hybrid_collection(client)
 
-    documents = _load_documents()
-    if not documents:
-        raise RuntimeError("Nessun documento trovato per indicizzare la codebase")
+    all_files = _iter_source_files()
+    logger.info(f"📂 Scansione completata: trovati {len(all_files)} file validi da processare.")
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=INDEX_CHUNK_SIZE,
-        chunk_overlap=INDEX_CHUNK_OVERLAP,
-    )
-    chunks = splitter.split_documents(documents)
+    all_documents: List[Document] = []
 
-    embeddings = NomicOllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_URL)
-
-    last_error: Exception | None = None
-    for attempt in range(1, 31):
+    # 1. Chunking semantico file per file
+    for path in all_files:
         try:
-            QdrantVectorStore.from_documents(
-                documents=chunks,
-                embedding=embeddings,
-                collection_name=QDRANT_COLLECTION,
-                url=f"http://{QDRANT_HOST}:6333",
-                force_recreate=True,
-            )
-            break
-        except Exception as exc:
-            last_error = exc
-            print(f"Indicizzazione non pronta, tentativo {attempt}/30: {exc}", flush=True)
-            time.sleep(5)
-    else:
-        raise RuntimeError(f"Indicizzazione fallita: {last_error}")
+            text = path.read_text(encoding="utf-8", errors="ignore").strip()
+            if not text:
+                continue
+                
+            if path.suffix == ".py":
+                chunker = PythonASTContextualChunker(path, text)
+                all_documents.extend(chunker.extract_chunks())
+            else:
+                all_documents.extend(_fallback_text_split(path, text, language=path.suffix.lstrip(".")))
+        except Exception as e:
+            logger.error(f"❌ Errore processamento {path}: {e}")
 
-    print(f"Indicizzazione completata: {len(documents)} file, {len(chunks)} chunk", flush=True)
-    
+    # 2. Aggiunta mappa architetturale globale
+    all_documents.extend(_build_codebase_summary_documents(all_files))
+
+    # 3. Batching e Ingestione Idempotente (senza force_recreate!)
+    total_docs = len(all_documents)
+    logger.info(f"🚀 Avvio indicizzazione ibrida di {total_docs} chunk semantici su Qdrant...")
+
+    for i in range(0, total_docs, BATCH_SIZE):
+        batch = all_documents[i : i + BATCH_SIZE]
+
+        # encode_and_upsert_batch aggiorna solo i chunk con ID (derivato da MD5) modificato o nuovo
+        encode_and_upsert_batch(model, client, batch)
+        logger.info(f"   ⏳ Caricati e indicizzati {min(i + BATCH_SIZE, total_docs)}/{total_docs} chunk...")
+
+    elapsed = round(time.time() - start_time, 2)
+    logger.info(f"🎯 Indicizzazione SOTA completata con successo in {elapsed}s! Database pronto per query ibride.")
+
+    # Creazione flag per Docker Compose / Healthcheck
     flag_file = BASE_DIR / ".index_complete"
     flag_file.touch()
-    print(f"Creato flag file: {flag_file}", flush=True)
+    logger.info(f"🏁 Flag file creato: {flag_file}")
 
 
 if __name__ == "__main__":

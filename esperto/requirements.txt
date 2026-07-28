@@ -10,3 +10,5 @@ uvicorn
 langchain-text-splitters
 tqdm
 rank-bm25
+FlagEmbedding
+torch --index-url https://download.pytorch.org/whl/cpu

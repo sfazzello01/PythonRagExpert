@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Dict, List, Optional
+
 from langchain_core.prompts import (
     ChatPromptTemplate,
     SystemMessagePromptTemplate,
@@ -10,13 +12,18 @@ from langchain_core.prompts import (
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_ollama import ChatOllama  # type: ignore
-from langchain_qdrant import QdrantVectorStore  # type: ignore
-from qdrant_client import QdrantClient  # type: ignore
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue  # type: ignore
 from langchain_core.documents import Document
+from qdrant_client import AsyncQdrantClient  # type: ignore
+from qdrant_client.http.models import (  # type: ignore
+    Filter,
+    FieldCondition,
+    MatchValue,
+    Prefetch,
+    SparseVector,
+)
+from FlagEmbedding import BGEM3FlagModel  # type: ignore
 
 from config import (
-    EMBEDDING_MODEL,
     LLM_MODEL,
     OLLAMA_URL,
     QDRANT_COLLECTION,
@@ -24,20 +31,68 @@ from config import (
     TEMPERATURE,
     K,
 )
-from .nomic_conf import NomicOllamaEmbeddings, sanitize_text
+
+# Candidati recuperati da dense e da sparse prima del rerank ColBERT finale.
+# Deve restare coerente con l'ordine di grandezza usato in indicizzazione.
+PREFETCH_LIMIT = 20
+
+
+def sanitize_text(text: str) -> str:
+    """Rimuove caratteri non UTF-8 da una stringa, prevenendo errori di codifica."""
+    return text.encode("utf-8", "ignore").decode("utf-8")
+
+
+# Stesso modello ibrido usato in indicizzatore.py: un solo forward pass
+# produce dense + sparse (lexical_weights) + ColBERT, coerenti con lo spazio
+# vettoriale della collection. Caricato una sola volta a livello di modulo.
+_bge_m3 = BGEM3FlagModel("BAAI/bge-m3", use_fp16=False)
+
+
+class _QueryVectors:
+    __slots__ = ("dense", "sparse", "colbert")
+
+    def __init__(self, dense: List[float], sparse: SparseVector, colbert: List[List[float]]):
+        self.dense = dense
+        self.sparse = sparse
+        self.colbert = colbert
+
+
+def _lexical_weights_to_sparse_vector(lexical_weights: Dict[str, float]) -> SparseVector:
+    if not lexical_weights:
+        return SparseVector(indices=[], values=[])
+    indices, values = zip(*((int(token_id), float(weight)) for token_id, weight in lexical_weights.items()))
+    return SparseVector(indices=list(indices), values=list(values))
+
+
+def _encode_queries(texts: List[str]) -> List[_QueryVectors]:
+    """Encoding SINCRONO (PyTorch) di N query in un solo forward pass.
+
+    Va sempre chiamata tramite asyncio.to_thread: è una chiamata bloccante
+    e non deve mai girare direttamente nell'event loop di FastAPI.
+    """
+    output = _bge_m3.encode(
+        texts,
+        batch_size=len(texts),
+        max_length=8192,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=True,
+    )
+    return [
+        _QueryVectors(
+            dense=dense_vec.tolist(),
+            sparse=_lexical_weights_to_sparse_vector(lexical_weight),
+            colbert=colbert_vec.tolist(),
+        )
+        for dense_vec, lexical_weight, colbert_vec in zip(
+            output["dense_vecs"], output["lexical_weights"], output["colbert_vecs"]
+        )
+    ]
 
 
 def _build_rag_chain():
-    # 1. Inizializzazione Client Qdrant e Modello Embeddings
-    embeddings = NomicOllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_URL)
-    client = QdrantClient(url=f"http://{QDRANT_HOST}:6333")
-    
-    # Inizializzazione VectorStore (con parametro 'embedding' corretto)
-    vectorstore = QdrantVectorStore(
-        client=client,
-        collection_name=QDRANT_COLLECTION,
-        embedding=embeddings,
-    )
+    # 1. Inizializzazione Client Qdrant (async, niente più embedding esterno via Ollama)
+    client = AsyncQdrantClient(url=f"http://{QDRANT_HOST}:6333")
 
     # 2. Espansione Query Ottimizzata (3 query mirate invece di 6)
     def expand_queries(question: str) -> list[str]:
@@ -50,17 +105,45 @@ def _build_rag_chain():
             f"{cleaned} architectural structure flow",
         ]
 
+    async def _hybrid_search(
+        qv: _QueryVectors, k: int, query_filter: Optional[Filter] = None
+    ) -> List[Document]:
+        """Prefetch dense+sparse (candidati veloci) poi rerank finale con ColBERT (MaxSim)."""
+        response = await client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            prefetch=[
+                Prefetch(query=qv.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter),
+                Prefetch(query=qv.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter),
+            ],
+            query=qv.colbert,
+            using="colbert",
+            limit=k,
+            query_filter=query_filter,
+            with_payload=True,
+        )
+        return [
+            Document(
+                page_content=point.payload.get("page_content", ""),
+                metadata=point.payload.get("metadata", {}),
+            )
+            for point in response.points
+        ]
+
     # 3. Recupero del Contesto Asincrono con Parent Retrieval Controllato
     async def retrieve_context(question: str) -> str:
         queries = expand_queries(question)
         if not queries:
             return ""
 
+        # Un solo forward pass PyTorch per tutte e 3 le query espanse, eseguito
+        # in un thread separato per non bloccare l'event loop di FastAPI.
+        query_vectors = await asyncio.to_thread(_encode_queries, queries)
+        # La prima è sempre la domanda originale: la riusiamo per il parent
+        # retrieval invece di ri-encodare (stesso identico embedding).
+        original_qv = query_vectors[0]
+
         # Ricerca iniziale in parallelo per le query espanse
-        tasks = [
-            vectorstore.asimilarity_search(query=sanitize_text(q), k=K)
-            for q in queries
-        ]
+        tasks = [_hybrid_search(qv, k=K) for qv in query_vectors]
         results = await asyncio.gather(*tasks)
 
         # Rimozione duplicati dai risultati iniziali
@@ -89,19 +172,20 @@ def _build_rag_chain():
 
             processed_files.add(filename)
 
-            # Eseguiamo il Parent Retrieval locale (k=4 chunk adiacenti invece di 10)
+            # Eseguiamo il Parent Retrieval locale (k=4 chunk adiacenti invece di 10),
+            # riusando gli embedding della domanda originale: nessun nuovo encode.
             try:
-                same_file_docs = await vectorstore.asimilarity_search(
-                    query=sanitize_text(question),
+                same_file_docs = await _hybrid_search(
+                    original_qv,
                     k=4,
-                    filter=Filter(
+                    query_filter=Filter(
                         must=[
                             FieldCondition(
                                 key="metadata.filename",
-                                match=MatchValue(value=filename)
+                                match=MatchValue(value=filename),
                             )
                         ]
-                    )
+                    ),
                 )
                 final_docs.extend(same_file_docs)
             except Exception:
