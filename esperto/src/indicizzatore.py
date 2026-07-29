@@ -64,6 +64,7 @@ SKIP_DIRS = {
 INDEX_TARGETS = (
     BASE_DIR / "backend",
     BASE_DIR / "frontend",
+    BASE_DIR / "config.py",
     BASE_DIR / "domains.json",
     BASE_DIR / "docker-compose.yaml",
 )

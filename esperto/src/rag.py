@@ -138,7 +138,10 @@ def _build_rag_chain():
             docs = [
                 Document(
                     page_content=point.payload.get("page_content", ""),
-                    metadata=point.payload.get("metadata", {}),
+                    metadata={
+                        **point.payload.get("metadata", {}),
+                        "_colbert_score": point.score,
+                    },
                 )
                 for point in response.points
                 # Filter by semantic relevance threshold if non-zero
@@ -170,14 +173,15 @@ def _build_rag_chain():
         tasks = [_hybrid_search(qv, k=K) for qv in query_vectors]
         results = await asyncio.gather(*tasks)
 
-        # Rimozione duplicati dai risultati iniziali
-        seen_contents = set()
-        unique_docs: list[Document] = []
+        # Per ogni chunk conserviamo il migliore score ottenuto dalle query espanse.
+        unique_docs_by_content: dict[str, Document] = {}
         for query_res in results:
             for doc in query_res:
-                if doc.page_content not in seen_contents:
-                    seen_contents.add(doc.page_content)
-                    unique_docs.append(doc)
+                previous_doc = unique_docs_by_content.get(doc.page_content)
+                if previous_doc is None or doc.metadata["_colbert_score"] > previous_doc.metadata["_colbert_score"]:
+                    unique_docs_by_content[doc.page_content] = doc
+
+        unique_docs = list(unique_docs_by_content.values())
 
         final_docs: list[Document] = []
         processed_files = set()
@@ -217,13 +221,20 @@ def _build_rag_chain():
                 logger.warning(f"Parent retrieval failed for {filename}: {str(e)}, using single chunk")
                 final_docs.append(doc)
 
-        # Pulizia finale dei duplicati generati dalle intersezioni del parent retrieval
-        final_seen = set()
-        context_blocks = []
+        # Anche il parent retrieval puo restituire chunk gia presenti: manteniamo
+        # sempre la versione con il punteggio ColBERT piu alto.
+        final_docs_by_content: dict[str, Document] = {}
         for doc in final_docs:
-            if doc.page_content not in final_seen:
-                final_seen.add(doc.page_content)
-                context_blocks.append(doc.page_content)
+            previous_doc = final_docs_by_content.get(doc.page_content)
+            if previous_doc is None or doc.metadata["_colbert_score"] > previous_doc.metadata["_colbert_score"]:
+                final_docs_by_content[doc.page_content] = doc
+
+        ranked_docs = sorted(
+            final_docs_by_content.values(),
+            key=lambda doc: doc.metadata["_colbert_score"],
+            reverse=True,
+        )
+        context_blocks = [doc.page_content for doc in ranked_docs]
 
         return "\n\n---\n\n".join(context_blocks)
 
