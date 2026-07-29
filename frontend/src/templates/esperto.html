@@ -74,9 +74,20 @@
 
             <button
                     type="submit"
+                    id="submit-btn"
                     class="btn-primary">
 
                 Chiedi all'esperto
+
+            </button>
+
+            <button
+                    type="button"
+                    id="stop-btn"
+                    class="btn-secondary"
+                    style="display:none;">
+
+                &#9632; Interrompi
 
             </button>
 
@@ -120,6 +131,14 @@
 
                 </div>
 
+                <div class="metric-item" id="sources-item" style="display:none;">
+
+                    <span>Fonti</span>
+
+                    <div id="sources-list" style="margin-top:0.5rem; display:flex; flex-direction:column; gap:0.25rem;"></div>
+
+                </div>
+
             </div>
 
         </section>
@@ -133,131 +152,133 @@
 
 document.addEventListener("DOMContentLoaded", () => {
 
-    const form = document.getElementById("expert-form");
+    const form         = document.getElementById("expert-form");
+    const textarea     = document.getElementById("question");
+    const answer       = document.getElementById("answer");
+    const status       = document.getElementById("status");
+    const submitBtn    = document.getElementById("submit-btn");
+    const stopBtn      = document.getElementById("stop-btn");
+    const sourcesItem  = document.getElementById("sources-item");
+    const sourcesList  = document.getElementById("sources-list");
 
-    const textarea = document.getElementById("question");
-
-    const answer = document.getElementById("answer");
-
-    const status = document.getElementById("status");
-
-    const button = form.querySelector("button");
+    let currentController = null;
 
     function renderMarkdown(text){
-
         if(window.marked){
-
-            const html = marked.parse(text, {
-                breaks:true,
-                mangle:false,
-                headerIds:false
-            });
-
-            answer.innerHTML =
-                window.DOMPurify
-                    ? DOMPurify.sanitize(html)
-                    : html;
-
-        }else{
-
+            const html = marked.parse(text, { breaks:true, mangle:false, headerIds:false });
+            answer.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : html;
+        } else {
             answer.textContent = text;
-
         }
-
     }
 
-    form.addEventListener("submit", async (e)=>{
+    function displaySources(files){
+        sourcesList.innerHTML = "";
+        if(!files || files.length === 0){
+            sourcesItem.style.display = "none";
+            return;
+        }
+        files.forEach(f => {
+            const tag = document.createElement("code");
+            tag.textContent = f;
+            tag.style.cssText = "display:block; font-size:0.78rem; padding:0.2rem 0.4rem; border-radius:3px; background:rgba(255,255,255,0.08); word-break:break-all;";
+            sourcesList.appendChild(tag);
+        });
+        sourcesItem.style.display = "block";
+    }
+
+    stopBtn.addEventListener("click", () => {
+        if(currentController){
+            currentController.abort();
+        }
+    });
+
+    form.addEventListener("submit", async (e) => {
 
         e.preventDefault();
 
         const question = textarea.value.trim();
 
         if(!question){
-
             answer.textContent = "Scrivi una domanda prima di inviare.";
-
             status.textContent = "Pronto";
-
             textarea.focus();
-
             return;
-
         }
 
-        button.disabled = true;
+        currentController = new AbortController();
 
-        button.textContent = "Sto pensando...";
-
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Sto pensando...";
+        stopBtn.style.display = "inline-block";
         status.textContent = "Generazione";
-
         answer.textContent = "";
+        sourcesItem.style.display = "none";
+        sourcesList.innerHTML = "";
 
         try{
 
-            const response = await fetch("/ask",{
-
-                method:"POST",
-
-                headers:{
-                    "Content-Type":"application/json"
-                },
-
-                body:JSON.stringify({
-
-                    message:question
-
-                })
-
+            const response = await fetch("/ask", {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({ message: question }),
+                signal:  currentController.signal
             });
 
             if(!response.ok){
-
                 const errorText = await response.text();
-
                 throw new Error(errorText || "Errore nella richiesta");
-
             }
 
-            const reader = response.body.getReader();
-
+            const reader  = response.body.getReader();
             const decoder = new TextDecoder();
 
-            let fullText = "";
+            let fullText       = "";
+            let sourcesHandled = false;
 
             while(true){
 
-                const {done,value} = await reader.read();
+                const { done, value } = await reader.read();
+                if(done) break;
 
-                if(done)
-                    break;
+                fullText += decoder.decode(value, { stream: true });
 
-                fullText += decoder.decode(value);
+                // Extract the SOURCES: header from the very first line
+                if(!sourcesHandled && fullText.includes("\n")){
+                    const nl = fullText.indexOf("\n");
+                    const firstLine = fullText.substring(0, nl);
+                    if(firstLine.startsWith("SOURCES:")){
+                        try{
+                            const data = JSON.parse(firstLine.substring(8));
+                            displaySources(data.files);
+                        } catch(_){}
+                        fullText = fullText.substring(nl + 1);
+                    }
+                    sourcesHandled = true;
+                }
 
                 renderMarkdown(fullText);
-
                 answer.scrollTop = answer.scrollHeight;
-
             }
 
             status.textContent = "Completata";
 
-        }
+        } catch(err){
 
-        catch(err){
+            if(err.name === "AbortError"){
+                status.textContent = "Interrotta";
+            } else {
+                console.error(err);
+                answer.textContent = err.message;
+                status.textContent = "Errore";
+            }
 
-            console.error(err);
+        } finally{
 
-            answer.textContent = err.message;
-
-            status.textContent = "Errore";
-
-        }
-
-        finally{
-
-            button.disabled = false;
-
-            button.textContent = "Chiedi all'esperto";
+            currentController = null;
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Chiedi all'esperto";
+            stopBtn.style.display = "none";
 
         }
 

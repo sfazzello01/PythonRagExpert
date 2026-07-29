@@ -31,11 +31,11 @@ class HybridRetriever:
     def __init__(self, client: AsyncQdrantClient | None = None):
         self._client = client or get_async_client()
 
-    async def retrieve_context(self, question: str) -> str:
-        """Build a de-duplicated context ordered by descending ColBERT relevance."""
+    async def retrieve_with_sources(self, question: str) -> tuple[str, list[str]]:
+        """Build de-duplicated context and return (context_str, sorted source filenames)."""
         queries = expand_queries(question)
         if not queries:
-            return ""
+            return "", []
 
         query_vectors = await asyncio.to_thread(encode_queries, queries)
         original_query_vectors = query_vectors[0]
@@ -77,4 +77,15 @@ class HybridRetriever:
             key=lambda document: document.metadata["_colbert_score"],
             reverse=True,
         )
-        return "\n\n---\n\n".join(document.page_content for document in ranked_documents)
+        source_filenames = sorted({
+            doc.metadata["filename"]
+            for doc in ranked_documents
+            if doc.metadata.get("filename") and doc.metadata["filename"] != "__codebase_map__"
+        })
+        context_str = "\n\n---\n\n".join(document.page_content for document in ranked_documents)
+        return context_str, source_filenames
+
+    async def retrieve_context(self, question: str) -> str:
+        """Build a de-duplicated context ordered by descending ColBERT relevance."""
+        context, _ = await self.retrieve_with_sources(question)
+        return context

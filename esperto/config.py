@@ -120,7 +120,7 @@ SKIP_DIRS = frozenset(_env_csv(
 ))
 INDEX_TARGET_PATHS = _env_csv(
     "INDEX_TARGET_PATHS",
-    "backend,frontend,config.py,domains.json,docker-compose.yaml",
+    "backend,frontend,domains.json,docker-compose.yaml",
 )
 PYTHON_AST_MAX_CHARS = 1500
 
