@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Dict, List, Optional
 
 from langchain_core.prompts import (
@@ -30,11 +31,15 @@ from config import (
     QDRANT_HOST,
     TEMPERATURE,
     K,
+    PREFETCH_LIMIT,
+    QDRANT_QUERY_TIMEOUT,
+    LLM_INFERENCE_TIMEOUT,
+    SEMANTIC_RELEVANCE_THRESHOLD,
+    EMBEDDING_MAX_LENGTH,
 )
 
-# Candidati recuperati da dense e da sparse prima del rerank ColBERT finale.
-# Deve restare coerente con l'ordine di grandezza usato in indicizzazione.
-PREFETCH_LIMIT = 20
+logger = logging.getLogger("EspertoRAG")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 def sanitize_text(text: str) -> str:
@@ -73,7 +78,7 @@ def _encode_queries(texts: List[str]) -> List[_QueryVectors]:
     output = _bge_m3.encode(
         texts,
         batch_size=len(texts),
-        max_length=8192,
+        max_length=EMBEDDING_MAX_LENGTH,
         return_dense=True,
         return_sparse=True,
         return_colbert_vecs=True,
@@ -94,7 +99,7 @@ def _build_rag_chain():
     # 1. Inizializzazione Client Qdrant (async, niente più embedding esterno via Ollama)
     client = AsyncQdrantClient(url=f"http://{QDRANT_HOST}:6333")
 
-    # 2. Espansione Query Ottimizzata (3 query mirate invece di 6)
+    # 2. Espansione Query Ottimizzata (4 query mirate: semantica originale, implementazione, architettura, usage)
     def expand_queries(question: str) -> list[str]:
         cleaned = sanitize_text(question).strip()
         if not cleaned:
@@ -103,31 +108,50 @@ def _build_rag_chain():
             cleaned,
             f"{cleaned} implementation function code",
             f"{cleaned} architectural structure flow",
+            f"{cleaned} usage examples exception handling",
         ]
 
     async def _hybrid_search(
         qv: _QueryVectors, k: int, query_filter: Optional[Filter] = None
     ) -> List[Document]:
-        """Prefetch dense+sparse (candidati veloci) poi rerank finale con ColBERT (MaxSim)."""
-        response = await client.query_points(
-            collection_name=QDRANT_COLLECTION,
-            prefetch=[
-                Prefetch(query=qv.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter),
-                Prefetch(query=qv.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter),
-            ],
-            query=qv.colbert,
-            using="colbert",
-            limit=k,
-            query_filter=query_filter,
-            with_payload=True,
-        )
-        return [
-            Document(
-                page_content=point.payload.get("page_content", ""),
-                metadata=point.payload.get("metadata", {}),
+        """Prefetch dense+sparse (candidati veloci) poi rerank finale con ColBERT (MaxSim).
+        
+        Includes timeout and error handling to prevent stream corruption.
+        """
+        try:
+            response = await asyncio.wait_for(
+                client.query_points(
+                    collection_name=QDRANT_COLLECTION,
+                    prefetch=[
+                        Prefetch(query=qv.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter),
+                        Prefetch(query=qv.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter),
+                    ],
+                    query=qv.colbert,
+                    using="colbert",
+                    limit=k,
+                    query_filter=query_filter,
+                    with_payload=True,
+                ),
+                timeout=QDRANT_QUERY_TIMEOUT,
             )
-            for point in response.points
-        ]
+            
+            docs = [
+                Document(
+                    page_content=point.payload.get("page_content", ""),
+                    metadata=point.payload.get("metadata", {}),
+                )
+                for point in response.points
+                # Filter by semantic relevance threshold if non-zero
+                if point.score >= SEMANTIC_RELEVANCE_THRESHOLD
+            ]
+            logger.debug(f"Hybrid search returned {len(docs)} documents (threshold={SEMANTIC_RELEVANCE_THRESHOLD})")
+            return docs
+        except asyncio.TimeoutError:
+            logger.error(f"Qdrant query timeout after {QDRANT_QUERY_TIMEOUT}s")
+            return []
+        except Exception as e:
+            logger.error(f"Error during hybrid search: {type(e).__name__}: {str(e)}")
+            return []
 
     # 3. Recupero del Contesto Asincrono con Parent Retrieval Controllato
     async def retrieve_context(question: str) -> str:
@@ -135,7 +159,7 @@ def _build_rag_chain():
         if not queries:
             return ""
 
-        # Un solo forward pass PyTorch per tutte e 3 le query espanse, eseguito
+        # Un solo forward pass PyTorch per tutte e 4 le query espanse, eseguito
         # in un thread separato per non bloccare l'event loop di FastAPI.
         query_vectors = await asyncio.to_thread(_encode_queries, queries)
         # La prima è sempre la domanda originale: la riusiamo per il parent
@@ -188,8 +212,9 @@ def _build_rag_chain():
                     ),
                 )
                 final_docs.extend(same_file_docs)
-            except Exception:
+            except Exception as e:
                 # In caso di errore di filtro o Qdrant, facciamo un fallback sul chunk singolo
+                logger.warning(f"Parent retrieval failed for {filename}: {str(e)}, using single chunk")
                 final_docs.append(doc)
 
         # Pulizia finale dei duplicati generati dalle intersezioni del parent retrieval

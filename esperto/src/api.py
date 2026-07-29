@@ -1,16 +1,28 @@
+import asyncio
+import logging
+import os
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.responses import StreamingResponse  # type: ignore
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient  # type: ignore
 
 from .rag import stream_expert_response
-from config import QDRANT_HOST, QDRANT_COLLECTION
+from config import (
+    QDRANT_HOST,
+    QDRANT_COLLECTION,
+    MAX_MESSAGE_LENGTH,
+    MIN_MESSAGE_LENGTH,
+    LLM_INFERENCE_TIMEOUT,
+)
+
+logger = logging.getLogger("EspertoAPI")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 app = FastAPI()
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=3, max_length=5000, description="User question to the expert")
 
 
 @app.get("/health")
@@ -23,8 +35,8 @@ def health_check():
     """
     try:
         from pathlib import Path
-        BASE_DIR = Path("/app")
-        flag_file = BASE_DIR / ".index_complete"
+        state_dir = Path(os.getenv("INDEX_STATE_DIR", "/app/state"))
+        flag_file = state_dir / "index_complete"
         
         # Verifica se il file flag esiste (indicizzazione completata)
         if not flag_file.exists():
@@ -63,7 +75,29 @@ async def ask_expert(request: ChatRequest) -> StreamingResponse:
     Returns:
         StreamingResponse: La risposta dell'esperto in streaming, chunk per chunk.
     """
+    # Validate message length
+    message = request.message.strip()
+    if len(message) < MIN_MESSAGE_LENGTH or len(message) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message length must be between {MIN_MESSAGE_LENGTH} and {MAX_MESSAGE_LENGTH} characters"
+        )
+    
+    logger.info(f"Query received: {len(message)} chars")
+    
+    async def timeout_wrapper():
+        """Wrapper with timeout to prevent indefinite streaming."""
+        try:
+            async for chunk in stream_expert_response(message):
+                yield chunk
+        except asyncio.TimeoutError:
+            logger.error(f"LLM inference timeout after {LLM_INFERENCE_TIMEOUT}s")
+            yield "[ERROR] La risposta ha superato il timeout massimo."
+        except Exception as e:
+            logger.error(f"Error during streaming: {type(e).__name__}: {str(e)}")
+            yield f"[ERROR] Si è verificato un errore: {type(e).__name__}"
+    
     return StreamingResponse(
-        stream_expert_response(request.message),
+        timeout_wrapper(),
         media_type="text/plain; charset=utf-8",
     )

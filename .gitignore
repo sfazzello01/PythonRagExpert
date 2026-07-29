@@ -225,3 +225,9 @@ ollama_data/
 
 # Qdrant
 qdrant_data/
+
+# hugginFace
+hf_cache/
+
+# Esperto persistent index state
+esperto_state/

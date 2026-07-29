@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+
 langchain
 langchain-community
 langchain-ollama
@@ -9,6 +11,5 @@ pydantic
 uvicorn
 langchain-text-splitters
 tqdm
-rank-bm25
 FlagEmbedding
-torch --index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cu124

@@ -6,6 +6,7 @@ import ast
 import time
 import uuid
 import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import List, Dict, Any
@@ -22,7 +23,9 @@ from qdrant_client.http.models import (
     MultiVectorConfig,
     MultiVectorComparator,
 )
+from qdrant_client.http.exceptions import UnexpectedResponse
 from FlagEmbedding import BGEM3FlagModel
+import torch
 
 # =====================================================================
 # CONFIGURAZIONE E VARIABILI D'AMBIENTE
@@ -33,14 +36,25 @@ logger = logging.getLogger("EspertoSOTA")
 BASE_DIR = Path(os.getenv("BASE_DIR", "/app"))
 QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "codebase_knowledge")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "codebase_expert_bgem3_v1")
 
 # Modello BGE-M3 unificato (PyTorch via FlagEmbedding, non ONNX/fastembed):
 # un solo forward pass produce dense + sparse (lexical_weights) + ColBERT (multi-vettore)
 DENSE_MODEL_NAME = "BAAI/bge-m3"
 DENSE_DIM = 1024
-BGE_M3_USE_FP16 = os.getenv("BGE_M3_USE_FP16", "false").lower() == "true"  # utile solo su GPU
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "30"))
+BGE_M3_DEVICE = os.getenv("BGE_M3_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+if BGE_M3_DEVICE.startswith("cuda") and not torch.cuda.is_available():
+    logger.warning("CUDA richiesta ma non disponibile: uso CPU per BGE-M3.")
+    BGE_M3_DEVICE = "cpu"
+BGE_M3_USE_FP16 = (
+    os.getenv("BGE_M3_USE_FP16", "true").lower() == "true"
+    and BGE_M3_DEVICE.startswith("cuda")
+)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
+EMBEDDING_MAX_LENGTH = int(os.getenv("EMBEDDING_MAX_LENGTH", "1024"))
+INDEX_STATE_DIR = Path(os.getenv("INDEX_STATE_DIR", str(BASE_DIR / "state")))
+INDEX_STATE_FILE = INDEX_STATE_DIR / "index_state.json"
+INDEX_COMPLETE_FILE = INDEX_STATE_DIR / "index_complete"
 
 SUPPORTED_EXTENSIONS = {".py", ".json", ".yaml", ".yml", ".md", ".txt", ".html", ".ts", ".js"}
 SKIP_DIRS = {
@@ -50,8 +64,6 @@ SKIP_DIRS = {
 INDEX_TARGETS = (
     BASE_DIR / "backend",
     BASE_DIR / "frontend",
-    BASE_DIR / "src",
-    BASE_DIR / "config.py",
     BASE_DIR / "domains.json",
     BASE_DIR / "docker-compose.yaml",
 )
@@ -291,6 +303,46 @@ def _iter_source_files() -> list[Path]:
     return sorted(files)
 
 
+def _source_fingerprint(files: list[Path]) -> str:
+    """Return a stable fingerprint of indexed sources and embedding settings."""
+    digest = hashlib.sha256()
+    digest.update(f"{DENSE_MODEL_NAME}:{DENSE_DIM}:{EMBEDDING_MAX_LENGTH}".encode("utf-8"))
+    for path in files:
+        relative_path = path.relative_to(BASE_DIR).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _index_is_current(fingerprint: str) -> bool:
+    try:
+        state = json.loads(INDEX_STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    return (
+        state.get("collection") == QDRANT_COLLECTION
+        and state.get("fingerprint") == fingerprint
+    )
+
+
+def _clear_index_state() -> None:
+    INDEX_STATE_FILE.unlink(missing_ok=True)
+    INDEX_COMPLETE_FILE.unlink(missing_ok=True)
+
+
+def _save_index_state(fingerprint: str, source_file_count: int) -> None:
+    INDEX_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state = {
+        "collection": QDRANT_COLLECTION,
+        "fingerprint": fingerprint,
+        "source_file_count": source_file_count,
+    }
+    temporary_file = INDEX_STATE_FILE.with_suffix(".tmp")
+    temporary_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    temporary_file.replace(INDEX_STATE_FILE)
+    INDEX_COMPLETE_FILE.touch()
+
+
 def _wait_for_qdrant() -> QdrantClient:
     url = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
     logger.info(f"🔌 Connessione a Qdrant su {url}...")
@@ -316,15 +368,25 @@ def load_bge_m3_model() -> BGEM3FlagModel:
     dense_vecs, lexical_weights (sparse) e colbert_vecs: qui sfruttiamo
     davvero la natura "ibrida" del modello, non solo il suo embedding denso.
     """
-    logger.info(f"🧠 Caricamento modello BGE-M3 unificato ({DENSE_MODEL_NAME}, fp16={BGE_M3_USE_FP16})...")
-    return BGEM3FlagModel(DENSE_MODEL_NAME, use_fp16=BGE_M3_USE_FP16)
+    logger.info(
+        f"🧠 Caricamento modello BGE-M3 unificato "
+        f"({DENSE_MODEL_NAME}, device={BGE_M3_DEVICE}, fp16={BGE_M3_USE_FP16})..."
+    )
+    return BGEM3FlagModel(
+        DENSE_MODEL_NAME,
+        use_fp16=BGE_M3_USE_FP16,
+        devices=BGE_M3_DEVICE,
+    )
 
 
-def ensure_hybrid_collection(client: QdrantClient) -> None:
-    """Crea la collection ibrida (dense + sparse + colbert multi-vector) se non esiste."""
+def ensure_hybrid_collection(client: QdrantClient, recreate: bool = False) -> None:
+    """Create the hybrid collection, optionally replacing an outdated index."""
     if client.collection_exists(QDRANT_COLLECTION):
-        logger.info(f"📦 Collection '{QDRANT_COLLECTION}' trovata. Modalità aggiornamento incrementale.")
-        return
+        if not recreate:
+            logger.info(f"📦 Collection '{QDRANT_COLLECTION}' trovata.")
+            return
+        logger.info(f"♻️ Rimozione collection obsoleta '{QDRANT_COLLECTION}'.")
+        client.delete_collection(QDRANT_COLLECTION)
 
     logger.info(f"✨ Creazione nuova collection ibrida '{QDRANT_COLLECTION}' (dense + sparse + colbert)...")
     client.create_collection(
@@ -366,7 +428,7 @@ def encode_and_upsert_batch(model: BGEM3FlagModel, client: QdrantClient, batch: 
     output = model.encode(
         texts,
         batch_size=len(texts),
-        max_length=8192,
+        max_length=EMBEDDING_MAX_LENGTH,
         return_dense=True,
         return_sparse=True,
         return_colbert_vecs=True,
@@ -388,18 +450,37 @@ def encode_and_upsert_batch(model: BGEM3FlagModel, client: QdrantClient, batch: 
             )
         )
 
-    client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+    try:
+        client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+    except UnexpectedResponse as error:
+        if "larger than allowed" not in str(error) or len(points) == 1:
+            raise
+
+        logger.warning(
+            "Payload batch troppo grande per Qdrant; eseguo l'upsert dei %d chunk singolarmente.",
+            len(points),
+        )
+        for point in points:
+            client.upsert(collection_name=QDRANT_COLLECTION, points=[point])
 
 
 def build_index() -> None:
     """Funzione principale di orchestrazione della pipeline SOTA."""
     start_time = time.time()
     client = _wait_for_qdrant()
-    model = load_bge_m3_model()
-    ensure_hybrid_collection(client)
 
     all_files = _iter_source_files()
     logger.info(f"📂 Scansione completata: trovati {len(all_files)} file validi da processare.")
+    fingerprint = _source_fingerprint(all_files)
+
+    if client.collection_exists(QDRANT_COLLECTION) and _index_is_current(fingerprint):
+        INDEX_COMPLETE_FILE.touch()
+        logger.info("✅ Codebase invariata: indice persistente già aggiornato, indicizzazione saltata.")
+        return
+
+    _clear_index_state()
+    ensure_hybrid_collection(client, recreate=client.collection_exists(QDRANT_COLLECTION))
+    model = load_bge_m3_model()
 
     all_documents: List[Document] = []
 
@@ -427,18 +508,21 @@ def build_index() -> None:
 
     for i in range(0, total_docs, BATCH_SIZE):
         batch = all_documents[i : i + BATCH_SIZE]
+        batch_start_time = time.time()
 
         # encode_and_upsert_batch aggiorna solo i chunk con ID (derivato da MD5) modificato o nuovo
         encode_and_upsert_batch(model, client, batch)
-        logger.info(f"   ⏳ Caricati e indicizzati {min(i + BATCH_SIZE, total_docs)}/{total_docs} chunk...")
+        batch_elapsed = time.time() - batch_start_time
+        logger.info(
+            f"   ⏳ Caricati e indicizzati {min(i + BATCH_SIZE, total_docs)}/{total_docs} chunk "
+            f"in {batch_elapsed:.1f}s..."
+        )
 
     elapsed = round(time.time() - start_time, 2)
     logger.info(f"🎯 Indicizzazione SOTA completata con successo in {elapsed}s! Database pronto per query ibride.")
 
-    # Creazione flag per Docker Compose / Healthcheck
-    flag_file = BASE_DIR / ".index_complete"
-    flag_file.touch()
-    logger.info(f"🏁 Flag file creato: {flag_file}")
+    _save_index_state(fingerprint, len(all_files))
+    logger.info(f"🏁 Stato persistente creato: {INDEX_STATE_FILE}")
 
 
 if __name__ == "__main__":
