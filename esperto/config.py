@@ -1,7 +1,17 @@
 # config.py
 import os
+from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
-from typing import Optional
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean environment variable using common textual values."""
+    return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
+
+
+def _env_csv(name: str, default: str) -> tuple[str, ...]:
+    """Read a comma-separated environment variable as a normalized tuple."""
+    return tuple(value.strip() for value in os.getenv(name, default).split(",") if value.strip())
 
 
 class AppConfig(BaseModel):
@@ -33,6 +43,13 @@ class AppConfig(BaseModel):
     qdrant_query_timeout: float = Field(default=30.0, ge=5.0, description="Timeout for Qdrant queries")
     llm_inference_timeout: float = Field(default=120.0, ge=10.0, description="Timeout for LLM inference")
 
+    # Indexing Configuration
+    base_dir: str = Field(default="/app", description="Root directory containing indexed sources")
+    bge_m3_device: str = Field(default="cuda", description="BGE-M3 device requested for indexing")
+    bge_m3_use_fp16: bool = Field(default=True, description="Use FP16 for BGE-M3 indexing on CUDA")
+    batch_size: int = Field(default=2, ge=1, le=128, description="Documents encoded per Qdrant upsert batch")
+    index_state_dir: str = Field(default="/app/state", description="Directory for persistent index state")
+
 
 def _load_config_from_env() -> AppConfig:
     """Load config from environment variables with fallback to defaults."""
@@ -52,6 +69,11 @@ def _load_config_from_env() -> AppConfig:
         "model_load_timeout": float(os.getenv("MODEL_LOAD_TIMEOUT", "60.0")),
         "qdrant_query_timeout": float(os.getenv("QDRANT_QUERY_TIMEOUT", "30.0")),
         "llm_inference_timeout": float(os.getenv("LLM_INFERENCE_TIMEOUT", "120.0")),
+        "base_dir": os.getenv("BASE_DIR", "/app"),
+        "bge_m3_device": os.getenv("BGE_M3_DEVICE", "cuda"),
+        "bge_m3_use_fp16": _env_flag("BGE_M3_USE_FP16", True),
+        "batch_size": int(os.getenv("BATCH_SIZE", "2")),
+        "index_state_dir": os.getenv("INDEX_STATE_DIR", "/app/state"),
     }
     try:
         return AppConfig(**config_data)
@@ -80,7 +102,26 @@ MODEL_LOAD_TIMEOUT = config.model_load_timeout
 QDRANT_QUERY_TIMEOUT = config.qdrant_query_timeout
 LLM_INFERENCE_TIMEOUT = config.llm_inference_timeout
 
-SUPPORTED_EXTENSIONS = (".py", ".json", ".txt", ".sh", ".html", ".css")
+BASE_DIR = Path(config.base_dir)
+BGE_M3_DEVICE = config.bge_m3_device
+BGE_M3_USE_FP16 = config.bge_m3_use_fp16
+BATCH_SIZE = config.batch_size
+INDEX_STATE_DIR = Path(config.index_state_dir)
+INDEX_STATE_FILE = INDEX_STATE_DIR / "index_state.json"
+INDEX_COMPLETE_FILE = INDEX_STATE_DIR / "index_complete"
+
+SUPPORTED_EXTENSIONS = frozenset(_env_csv(
+    "SUPPORTED_EXTENSIONS",
+    ".py,.json,.yaml,.yml,.md,.txt,.html,.ts,.js",
+))
+SKIP_DIRS = frozenset(_env_csv(
+    "SKIP_DIRS",
+    "__pycache__,.git,.pytest_cache,.mypy_cache,logs,mariadb_data,ollama_data,qdrant_data,node_modules,dist,build",
+))
+INDEX_TARGET_PATHS = _env_csv(
+    "INDEX_TARGET_PATHS",
+    "backend,frontend,config.py,domains.json,docker-compose.yaml",
+)
 PYTHON_AST_MAX_CHARS = 1500
 
 # Chunk size ridotto per evitare l'offloading in CPU e velocizzare la KV Cache

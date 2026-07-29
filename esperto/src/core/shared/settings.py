@@ -1,0 +1,25 @@
+"""Stable internal access to the validated application configuration."""
+
+from config import (
+    BASE_DIR,
+    BATCH_SIZE,
+    BGE_M3_DEVICE,
+    BGE_M3_USE_FP16,
+    EMBEDDING_MAX_LENGTH,
+    INDEX_COMPLETE_FILE,
+    INDEX_STATE_DIR,
+    INDEX_STATE_FILE,
+    INDEX_TARGET_PATHS,
+    K,
+    PREFETCH_LIMIT,
+    QDRANT_COLLECTION,
+    QDRANT_HOST,
+    QDRANT_PORT,
+    QDRANT_QUERY_TIMEOUT,
+    SEMANTIC_RELEVANCE_THRESHOLD,
+    SKIP_DIRS,
+    SUPPORTED_EXTENSIONS,
+)
+
+DENSE_MODEL_NAME = "BAAI/bge-m3"
+DENSE_DIMENSION = 1024

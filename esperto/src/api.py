@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.responses import StreamingResponse  # type: ignore
 from pydantic import BaseModel, Field
-from qdrant_client import QdrantClient  # type: ignore
 
 from .rag import stream_expert_response
 from config import (
@@ -14,6 +15,7 @@ from config import (
     MIN_MESSAGE_LENGTH,
     LLM_INFERENCE_TIMEOUT,
 )
+from .core.services.qdrant import get_sync_client
 
 logger = logging.getLogger("EspertoAPI")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -34,7 +36,6 @@ def health_check():
         Dict con stato del servizio e dell'indicizzazione.
     """
     try:
-        from pathlib import Path
         state_dir = Path(os.getenv("INDEX_STATE_DIR", "/app/state"))
         flag_file = state_dir / "index_complete"
         
@@ -46,7 +47,7 @@ def health_check():
             }
         
         # Verifica anche che Qdrant sia accessibile e abbia dati
-        client = QdrantClient(url=f"http://{QDRANT_HOST}:6333")
+        client = get_sync_client()
         collection_info = client.get_collection(QDRANT_COLLECTION)
         
         if collection_info.points_count == 0:

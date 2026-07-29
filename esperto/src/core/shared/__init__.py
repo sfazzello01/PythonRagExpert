@@ -1,0 +1,1 @@
+"""Shared value types, configuration adapters, and small utilities."""

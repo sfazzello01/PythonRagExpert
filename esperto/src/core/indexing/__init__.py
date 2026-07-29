@@ -1,0 +1,1 @@
+"""Codebase discovery, semantic chunking, and index-build orchestration."""
