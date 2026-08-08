@@ -56,7 +56,7 @@ def ask_ollama(prompt: str, model: str, think: bool = THINK) -> str:
     )
 
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request, timeout=600) as response:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         raise RuntimeError(f"Ollama HTTP error: {error.code} {error.reason}") from error
@@ -104,7 +104,7 @@ async def stream_ollama(prompt: str, model: str) -> AsyncIterator[str]:
     )
 
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request, timeout=600) as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
                 if not line:
@@ -159,6 +159,7 @@ def _extract_json_response(raw_response: str) -> dict[str, Any]:
 
     return parsed_response
 
+MAX_CHARS = 8000
 
 def build_judge_prompt(parsed_text: str, gold_text: str) -> str:
     """
@@ -171,7 +172,8 @@ def build_judge_prompt(parsed_text: str, gold_text: str) -> str:
     Returns:
         Prompt completo da inviare al modello per ottenere un giudizio strutturato.
     """
-
+    parsed_text = parsed_text[:MAX_CHARS]
+    gold_text = gold_text[:MAX_CHARS]
     return (
         """
             Sei un sistema esperto di controllo qualità per il Text Extraction (OCR/Parser). Il tuo compito è valutare l'accuratezza del testo estratto (`parsed_text`) confrontandolo con il testo di riferimento (`gold_text`), che rappresenta la verità assoluta (ground truth).

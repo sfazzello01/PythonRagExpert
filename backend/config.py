@@ -23,8 +23,8 @@ PHI = "phi4-mini"
 QWEN = "qwen3:4b"
 MINISTRAL = "ministral-3:3b"
 
-MODEL = PHI #PHI per lo sviluppo perchè è velocissimo, GEMMA per la produzione
+MODEL = LLAMA #PHI per lo sviluppo perchè è velocissimo, GEMMA per la produzione
 
 THINK = False #False per lo sviluppo, True per la produzione
 
-NO_LLM = True #True per lo sviluppo, False per la produzione
+NO_LLM = False #True per lo sviluppo, False per la produzione

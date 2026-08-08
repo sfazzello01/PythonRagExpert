@@ -135,7 +135,7 @@
 
                     <span>Fonti</span>
 
-                    <div id="sources-list" style="margin-top:0.5rem; display:flex; flex-direction:column; gap:0.25rem;"></div>
+                    <div id="sources-list" class="sources-list"></div>
 
                 </div>
 
@@ -172,17 +172,52 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    function displaySources(files){
+    function displaySources(sources){
         sourcesList.innerHTML = "";
-        if(!files || files.length === 0){
+        if(!sources || sources.length === 0){
             sourcesItem.style.display = "none";
             return;
         }
-        files.forEach(f => {
-            const tag = document.createElement("code");
-            tag.textContent = f;
-            tag.style.cssText = "display:block; font-size:0.78rem; padding:0.2rem 0.4rem; border-radius:3px; background:rgba(255,255,255,0.08); word-break:break-all;";
-            sourcesList.appendChild(tag);
+        sources.forEach((source, index) => {
+            const details = document.createElement("details");
+            details.className = "source-card";
+
+            const summary = document.createElement("summary");
+            summary.className = "source-summary";
+
+            const title = document.createElement("div");
+            title.className = "source-title";
+            title.textContent = `${index + 1}. ${source.filename || "Sorgente"}`;
+
+            const meta = document.createElement("div");
+            meta.className = "source-meta";
+            const parts = [];
+            if(source.service){
+                parts.push(source.service);
+            }
+            if(source.symbol_name){
+                parts.push(source.symbol_name);
+            }
+            if(source.chunk_type){
+                parts.push(source.chunk_type);
+            }
+            if(source.start_line !== undefined && source.end_line !== undefined && source.start_line !== null && source.end_line !== null){
+                parts.push(`L${source.start_line}-L${source.end_line}`);
+            }
+            if(source.score !== undefined && source.score !== null){
+                parts.push(`score ${Number(source.score).toFixed(4)}`);
+            }
+            meta.textContent = parts.join(" • ");
+
+            const content = document.createElement("pre");
+            content.className = "source-content";
+            content.textContent = source.content || "";
+
+            summary.appendChild(title);
+            summary.appendChild(meta);
+            details.appendChild(summary);
+            details.appendChild(content);
+            sourcesList.appendChild(details);
         });
         sourcesItem.style.display = "block";
     }
@@ -250,7 +285,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     if(firstLine.startsWith("SOURCES:")){
                         try{
                             const data = JSON.parse(firstLine.substring(8));
-                            displaySources(data.files);
+                            displaySources(data.sources || data.files);
                         } catch(_){}
                         fullText = fullText.substring(nl + 1);
                     }

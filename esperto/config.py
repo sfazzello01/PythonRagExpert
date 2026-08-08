@@ -29,7 +29,7 @@ class AppConfig(BaseModel):
     qdrant_collection: str = Field(default="codebase_expert_bgem3_v1", description="Qdrant collection name")
     
     # Retrieval Hyperparameters
-    k: int = Field(default=10, ge=1, le=50, description="Number of primary chunks to retrieve")
+    k: int = Field(default=6, ge=1, le=50, description="Number of primary chunks to retrieve")
     prefetch_limit: int = Field(default=20, ge=1, le=100, description="Prefetch limit for dense+sparse before rerank")
     semantic_relevance_threshold: float = Field(default=0.0, ge=0.0, le=1.0, description="ColBERT score threshold")
     embedding_max_length: int = Field(default=1024, ge=128, le=8192, description="Maximum tokens per BGE-M3 embedding")
@@ -60,7 +60,7 @@ def _load_config_from_env() -> AppConfig:
         "qdrant_host": os.getenv("QDRANT_HOST", "qdrant"),
         "qdrant_port": int(os.getenv("QDRANT_PORT", "6333")),
         "qdrant_collection": os.getenv("QDRANT_COLLECTION", "codebase_expert_bgem3_v1"),
-        "k": int(os.getenv("K", "10")),
+        "k": int(os.getenv("K", "6")),
         "prefetch_limit": int(os.getenv("PREFETCH_LIMIT", "20")),
         "semantic_relevance_threshold": float(os.getenv("SEMANTIC_RELEVANCE_THRESHOLD", "0.0")),
         "embedding_max_length": int(os.getenv("EMBEDDING_MAX_LENGTH", "1024")),
@@ -112,7 +112,7 @@ INDEX_COMPLETE_FILE = INDEX_STATE_DIR / "index_complete"
 
 SUPPORTED_EXTENSIONS = frozenset(_env_csv(
     "SUPPORTED_EXTENSIONS",
-    ".py,.json,.yaml,.yml,.md,.txt,.html,.ts,.js",
+    ".py,.yaml,.yml,.md,.txt,.html",
 ))
 SKIP_DIRS = frozenset(_env_csv(
     "SKIP_DIRS",

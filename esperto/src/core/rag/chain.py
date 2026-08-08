@@ -34,6 +34,6 @@ rag_chain = build_rag_chain()
 async def stream_expert_response(question: str):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
     context, sources = await _retriever.retrieve_with_sources(question)
-    yield f"SOURCES:{json.dumps({'files': sources}, ensure_ascii=False)}\n"
+    yield f"SOURCES:{json.dumps({'sources': sources}, ensure_ascii=False)}\n"
     async for chunk in _generation_chain.astream({"context": context, "question": question}):
         yield chunk

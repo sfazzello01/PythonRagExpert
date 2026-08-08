@@ -176,6 +176,64 @@ input[type="url"], select {
     margin: 1rem 0;
     font-size: 1.1rem;}
 
+.sources-list {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+.source-card {
+    background: #151515;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+}
+
+.source-card summary {
+    list-style: none;
+    cursor: pointer;
+}
+
+.source-card summary::-webkit-details-marker {
+    display: none;
+}
+
+.source-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.source-title {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: #f2f2f2;
+    word-break: break-word;
+}
+
+.source-meta {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    word-break: break-word;
+}
+
+.source-content {
+    margin: 0.65rem 0 0;
+    max-height: 260px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--text-color);
+    background: #101010;
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+
 .badge {
     padding: 0.2rem 0.6rem;
     border-radius: 12px;

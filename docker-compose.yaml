@@ -57,7 +57,10 @@ services:
     ports:
       - "11434:11434"
     environment:
-    - OLLAMA_CONTEXT_LENGTH=64000
+    - OLLAMA_CONTEXT_LENGTH=8192
+    - OLLAMA_KV_CACHE_TYPE=q8_0
+    - OLLAMA_FLASH_ATTENTION=1
+    - OLLAMA_KEEP_ALIVE=-1
     volumes:
       - ./ollama_data:/root/.ollama
     #----per gpu NVIDIA---, eliminare se non si ha scheda NVIDIA#
