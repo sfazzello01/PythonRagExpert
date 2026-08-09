@@ -109,16 +109,10 @@ services:
       - ./docker-compose.yaml:/app/docker-compose.yaml:ro
       - ./hf_cache:/root/.cache/huggingface
       - ./esperto_state:/app/state
+    env_file:
+      - .env
     environment:
-      - LLM_MODEL=${LLM_MODEL:-llama3.2:3b}
-      - OLLAMA_URL=http://ollama:11434
-      - QDRANT_HOST=qdrant
       - HF_HOME=/root/.cache/huggingface
-      - INDEX_STATE_DIR=/app/state
-      - BATCH_SIZE=${BATCH_SIZE:-2}
-      - EMBEDDING_MAX_LENGTH=${EMBEDDING_MAX_LENGTH:-1024}
-      - BGE_M3_DEVICE=${BGE_M3_DEVICE:-cuda}
-      - BGE_M3_USE_FP16=${BGE_M3_USE_FP16:-true}
     deploy:
       resources:
         reservations:

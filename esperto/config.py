@@ -4,14 +4,14 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    """Read a boolean environment variable using common textual values."""
-    return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
+def _env_flag(name: str) -> bool:
+    """Read a required boolean environment variable."""
+    return os.environ[name].lower() in {"1", "true", "yes", "on"}
 
 
-def _env_csv(name: str, default: str) -> tuple[str, ...]:
-    """Read a comma-separated environment variable as a normalized tuple."""
-    return tuple(value.strip() for value in os.getenv(name, default).split(",") if value.strip())
+def _env_csv(name: str) -> tuple[str, ...]:
+    """Read a required comma-separated environment variable."""
+    return tuple(value.strip() for value in os.environ[name].split(",") if value.strip())
 
 
 class AppConfig(BaseModel):
@@ -19,61 +19,61 @@ class AppConfig(BaseModel):
     model_config = {"extra": "ignore"}
     
     # Ollama LLM Configuration
-    ollama_url: str = Field(default="http://ollama:11434", description="Ollama API URL")
-    llm_model: str = Field(default="llama3.2:3b", description="LLM model name in Ollama")
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="LLM temperature (0=deterministic)")
+    ollama_url: str = Field(description="Ollama API URL")
+    llm_model: str = Field(description="LLM model name in Ollama")
+    temperature: float = Field(ge=0.0, le=2.0, description="LLM temperature (0=deterministic)")
     
     # Qdrant Vector DB Configuration
-    qdrant_host: str = Field(default="qdrant", description="Qdrant host")
-    qdrant_port: int = Field(default=6333, description="Qdrant port")
-    qdrant_collection: str = Field(default="codebase_expert_bgem3_v1", description="Qdrant collection name")
+    qdrant_host: str = Field(description="Qdrant host")
+    qdrant_port: int = Field(description="Qdrant port")
+    qdrant_collection: str = Field(description="Qdrant collection name")
     
     # Retrieval Hyperparameters
-    k: int = Field(default=6, ge=1, le=50, description="Number of primary chunks to retrieve")
-    prefetch_limit: int = Field(default=20, ge=1, le=100, description="Prefetch limit for dense+sparse before rerank")
-    semantic_relevance_threshold: float = Field(default=0.0, ge=0.0, le=1.0, description="ColBERT score threshold")
-    embedding_max_length: int = Field(default=1024, ge=128, le=8192, description="Maximum tokens per BGE-M3 embedding")
+    k: int = Field(ge=1, le=50, description="Number of primary chunks to retrieve")
+    prefetch_limit: int = Field(ge=1, le=100, description="Prefetch limit for dense+sparse before rerank")
+    semantic_relevance_threshold: float = Field(ge=0.0, le=1.0, description="ColBERT score threshold")
+    embedding_max_length: int = Field(ge=128, le=8192, description="Maximum tokens per BGE-M3 embedding")
     
     # API Configuration
-    max_message_length: int = Field(default=5000, ge=100, le=50000, description="Max message length")
-    min_message_length: int = Field(default=3, ge=1, le=100, description="Min message length")
+    max_message_length: int = Field(ge=100, le=50000, description="Max message length")
+    min_message_length: int = Field(ge=1, le=100, description="Min message length")
     
     # Timeout Configuration (seconds)
-    model_load_timeout: float = Field(default=60.0, ge=10.0, description="Timeout for BGE-M3 model load")
-    qdrant_query_timeout: float = Field(default=30.0, ge=5.0, description="Timeout for Qdrant queries")
-    llm_inference_timeout: float = Field(default=120.0, ge=10.0, description="Timeout for LLM inference")
+    model_load_timeout: float = Field(ge=10.0, description="Timeout for BGE-M3 model load")
+    qdrant_query_timeout: float = Field(ge=5.0, description="Timeout for Qdrant queries")
+    llm_inference_timeout: float = Field(ge=10.0, description="Timeout for LLM inference")
 
     # Indexing Configuration
-    base_dir: str = Field(default="/app", description="Root directory containing indexed sources")
-    bge_m3_device: str = Field(default="cuda", description="BGE-M3 device requested for indexing")
-    bge_m3_use_fp16: bool = Field(default=True, description="Use FP16 for BGE-M3 indexing on CUDA")
-    batch_size: int = Field(default=2, ge=1, le=128, description="Documents encoded per Qdrant upsert batch")
-    index_state_dir: str = Field(default="/app/state", description="Directory for persistent index state")
+    base_dir: str = Field(description="Root directory containing indexed sources")
+    bge_m3_device: str = Field(description="BGE-M3 device requested for indexing")
+    bge_m3_use_fp16: bool = Field(description="Use FP16 for BGE-M3 indexing on CUDA")
+    batch_size: int = Field(ge=1, le=128, description="Documents encoded per Qdrant upsert batch")
+    index_state_dir: str = Field(description="Directory for persistent index state")
 
 
 def _load_config_from_env() -> AppConfig:
-    """Load config from environment variables with fallback to defaults."""
+    """Load the complete application configuration from the root .env file."""
     config_data = {
-        "ollama_url": os.getenv("OLLAMA_URL", "http://ollama:11434"),
-        "llm_model": os.getenv("LLM_MODEL", "llama3.2:3b"),
-        "temperature": float(os.getenv("TEMPERATURE", "0.0")),
-        "qdrant_host": os.getenv("QDRANT_HOST", "qdrant"),
-        "qdrant_port": int(os.getenv("QDRANT_PORT", "6333")),
-        "qdrant_collection": os.getenv("QDRANT_COLLECTION", "codebase_expert_bgem3_v1"),
-        "k": int(os.getenv("K", "6")),
-        "prefetch_limit": int(os.getenv("PREFETCH_LIMIT", "20")),
-        "semantic_relevance_threshold": float(os.getenv("SEMANTIC_RELEVANCE_THRESHOLD", "0.0")),
-        "embedding_max_length": int(os.getenv("EMBEDDING_MAX_LENGTH", "1024")),
-        "max_message_length": int(os.getenv("MAX_MESSAGE_LENGTH", "5000")),
-        "min_message_length": int(os.getenv("MIN_MESSAGE_LENGTH", "3")),
-        "model_load_timeout": float(os.getenv("MODEL_LOAD_TIMEOUT", "60.0")),
-        "qdrant_query_timeout": float(os.getenv("QDRANT_QUERY_TIMEOUT", "30.0")),
-        "llm_inference_timeout": float(os.getenv("LLM_INFERENCE_TIMEOUT", "120.0")),
-        "base_dir": os.getenv("BASE_DIR", "/app"),
-        "bge_m3_device": os.getenv("BGE_M3_DEVICE", "cuda"),
-        "bge_m3_use_fp16": _env_flag("BGE_M3_USE_FP16", True),
-        "batch_size": int(os.getenv("BATCH_SIZE", "2")),
-        "index_state_dir": os.getenv("INDEX_STATE_DIR", "/app/state"),
+        "ollama_url": os.environ["OLLAMA_URL"],
+        "llm_model": os.environ["LLM_MODEL"],
+        "temperature": float(os.environ["TEMPERATURE"]),
+        "qdrant_host": os.environ["QDRANT_HOST"],
+        "qdrant_port": int(os.environ["QDRANT_PORT"]),
+        "qdrant_collection": os.environ["QDRANT_COLLECTION"],
+        "k": int(os.environ["K"]),
+        "prefetch_limit": int(os.environ["PREFETCH_LIMIT"]),
+        "semantic_relevance_threshold": float(os.environ["SEMANTIC_RELEVANCE_THRESHOLD"]),
+        "embedding_max_length": int(os.environ["EMBEDDING_MAX_LENGTH"]),
+        "max_message_length": int(os.environ["MAX_MESSAGE_LENGTH"]),
+        "min_message_length": int(os.environ["MIN_MESSAGE_LENGTH"]),
+        "model_load_timeout": float(os.environ["MODEL_LOAD_TIMEOUT"]),
+        "qdrant_query_timeout": float(os.environ["QDRANT_QUERY_TIMEOUT"]),
+        "llm_inference_timeout": float(os.environ["LLM_INFERENCE_TIMEOUT"]),
+        "base_dir": os.environ["BASE_DIR"],
+        "bge_m3_device": os.environ["BGE_M3_DEVICE"],
+        "bge_m3_use_fp16": _env_flag("BGE_M3_USE_FP16"),
+        "batch_size": int(os.environ["BATCH_SIZE"]),
+        "index_state_dir": os.environ["INDEX_STATE_DIR"],
     }
     try:
         return AppConfig(**config_data)
@@ -110,18 +110,9 @@ INDEX_STATE_DIR = Path(config.index_state_dir)
 INDEX_STATE_FILE = INDEX_STATE_DIR / "index_state.json"
 INDEX_COMPLETE_FILE = INDEX_STATE_DIR / "index_complete"
 
-SUPPORTED_EXTENSIONS = frozenset(_env_csv(
-    "SUPPORTED_EXTENSIONS",
-    ".py,.yaml,.yml,.md,.txt,.html",
-))
-SKIP_DIRS = frozenset(_env_csv(
-    "SKIP_DIRS",
-    "__pycache__,.git,.pytest_cache,.mypy_cache,logs,mariadb_data,ollama_data,qdrant_data,node_modules,dist,build",
-))
-INDEX_TARGET_PATHS = _env_csv(
-    "INDEX_TARGET_PATHS",
-    "backend,frontend,domains.json,docker-compose.yaml",
-)
+SUPPORTED_EXTENSIONS = frozenset(_env_csv("SUPPORTED_EXTENSIONS"))
+SKIP_DIRS = frozenset(_env_csv("SKIP_DIRS"))
+INDEX_TARGET_PATHS = _env_csv("INDEX_TARGET_PATHS")
 PYTHON_AST_MAX_CHARS = 1500
 
 # Chunk size ridotto per evitare l'offloading in CPU e velocizzare la KV Cache

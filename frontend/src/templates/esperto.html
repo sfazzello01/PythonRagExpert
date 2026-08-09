@@ -164,10 +164,15 @@ document.addEventListener("DOMContentLoaded", () => {
     let currentController = null;
 
     function renderMarkdown(text){
-        if(window.marked){
-            const html = marked.parse(text, { breaks:true, mangle:false, headerIds:false });
-            answer.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : html;
-        } else {
+        try{
+            if(window.marked){
+                const html = marked.parse(text, { breaks:true, mangle:false, headerIds:false });
+                answer.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : html;
+            } else {
+                answer.textContent = text;
+            }
+        } catch(err){
+            console.error("Errore nel rendering della risposta", err);
             answer.textContent = text;
         }
     }
@@ -268,32 +273,60 @@ document.addEventListener("DOMContentLoaded", () => {
             const reader  = response.body.getReader();
             const decoder = new TextDecoder();
 
-            let fullText       = "";
+            let sourceBuffer   = "";
+            let answerText     = "";
             let sourcesHandled = false;
+
+            function processChunk(text){
+                if(!text){
+                    return;
+                }
+
+                if(!sourcesHandled){
+                    sourceBuffer += text;
+                    const nl = sourceBuffer.indexOf("\n");
+
+                    if(nl !== -1){
+                        const firstLine = sourceBuffer.substring(0, nl);
+                        const remainder = sourceBuffer.substring(nl + 1);
+
+                        if(firstLine.startsWith("SOURCES:")){
+                            try{
+                                const data = JSON.parse(firstLine.substring(8));
+                                displaySources(data.sources || data.files);
+                            } catch(err){
+                                console.warn("Header SOURCES non valido", err);
+                            }
+                            answerText += remainder;
+                        } else {
+                            answerText += sourceBuffer;
+                        }
+
+                        sourceBuffer = "";
+                        sourcesHandled = true;
+                    }
+                } else {
+                    answerText += text;
+                }
+
+                renderMarkdown(answerText);
+                answer.scrollTop = answer.scrollHeight;
+            }
 
             while(true){
 
                 const { done, value } = await reader.read();
-                if(done) break;
-
-                fullText += decoder.decode(value, { stream: true });
-
-                // Extract the SOURCES: header from the very first line
-                if(!sourcesHandled && fullText.includes("\n")){
-                    const nl = fullText.indexOf("\n");
-                    const firstLine = fullText.substring(0, nl);
-                    if(firstLine.startsWith("SOURCES:")){
-                        try{
-                            const data = JSON.parse(firstLine.substring(8));
-                            displaySources(data.sources || data.files);
-                        } catch(_){}
-                        fullText = fullText.substring(nl + 1);
-                    }
-                    sourcesHandled = true;
+                if(done){
+                    processChunk(decoder.decode());
+                    break;
                 }
 
-                renderMarkdown(fullText);
-                answer.scrollTop = answer.scrollHeight;
+                processChunk(decoder.decode(value, { stream: true }));
+            }
+
+            if(!sourcesHandled && sourceBuffer){
+                answerText += sourceBuffer;
+                renderMarkdown(answerText);
             }
 
             status.textContent = "Completata";

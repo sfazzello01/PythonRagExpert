@@ -1,5 +1,6 @@
 """Config per il backend."""
 
+import os
 from pathlib import Path
 
 # Backend root directory
@@ -23,7 +24,7 @@ PHI = "phi4-mini"
 QWEN = "qwen3:4b"
 MINISTRAL = "ministral-3:3b"
 
-MODEL = LLAMA #PHI per lo sviluppo perchè è velocissimo, GEMMA per la produzione
+MODEL = os.environ["LLM_MODEL"]
 
 THINK = False #False per lo sviluppo, True per la produzione
 
