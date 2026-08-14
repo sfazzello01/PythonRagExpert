@@ -10,7 +10,7 @@ from qdrant_client import AsyncQdrantClient  # type: ignore
 from qdrant_client.http.models import FieldCondition, Filter, MatchValue  # type: ignore
 
 from ..services.embedding import encode_queries
-from ..services.qdrant import get_async_client, hybrid_search
+from ..services.qdrant import get_async_client, get_codebase_map, hybrid_search
 from ..shared.settings import K
 from .query import expand_queries
 
@@ -77,6 +77,14 @@ class HybridRetriever:
             key=lambda document: document.metadata["_colbert_score"],
             reverse=True,
         )
+        codebase_map = await get_codebase_map(self._client)
+        source_documents = [
+            document
+            for document in ranked_documents
+            if document.metadata.get("filename") != "__codebase_map__"
+        ]
+        if codebase_map:
+            source_documents.append(codebase_map)
         sources = [
             {
                 "filename": document.metadata.get("filename"),
@@ -89,10 +97,10 @@ class HybridRetriever:
                 "score": document.metadata.get("_colbert_score"),
                 "content": document.page_content,
             }
-            for document in ranked_documents
-            if document.metadata.get("filename") and document.metadata["filename"] != "__codebase_map__"
+            for document in source_documents
+            if document.metadata.get("filename")
         ]
-        context_str = "\n\n---\n\n".join(document.page_content for document in ranked_documents)
+        context_str = "\n\n---\n\n".join(document.page_content for document in source_documents)
         return context_str, sources
 
     async def retrieve_context(self, question: str) -> str:

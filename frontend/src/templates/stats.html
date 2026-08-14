@@ -1,29 +1,15 @@
-<!DOCTYPE html>
-<html lang="it">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Global Statistics</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-</head>
-<body class="dark-theme">
-    <header>
-        <a href="/" class="link-header-style">⬅Home Progetto</a>
-        <div class="system-status">
-            <span>Backend: <strong class="{{ status.backend }}">{{ status.backend }}</strong></span>
-            <span>DB: <strong class="{{ status.database }}">{{ status.database }}</strong></span>
-            <span>Ollama: <strong class="{{ status.ollama }}">{{ status.ollama }}</strong></span>
-            <span>Esperto: <strong class="{{ status.esperto }}">{{ status.esperto }}</strong></span>
-        </div>
-    </header>
+{% extends "base.html" %}
 
-    <main class="container">
+{% block title %}Statistiche globali{% endblock %}
+
+{% block content %}
         <header class="section-header">
             <h2>Statistiche Globali</h2>
             <p>Analisi aggregata dei documenti, della copertura per dominio e delle metriche medie.</p>
+            <button type="button" id="refresh-stats" class="btn-secondary">Aggiorna statistiche</button>
         </header>
 
-        <p id="stats-message" class="italic text-secondary">Caricamento statistiche in corso...</p>
+        <p id="stats-message" class="inline-message" role="status" aria-live="polite">Caricamento statistiche in corso...</p>
 
         <div class="stats-summary">
             <div class="stat-card">
@@ -76,8 +62,9 @@
                 </table>
             </div>
         </section>
-    </main>
+{% endblock %}
 
+{% block scripts %}
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const totalGs = document.getElementById('total-gs');
@@ -87,6 +74,7 @@
             const statsBody = document.getElementById('stats-body');
             const parserCanvas = document.getElementById('parserChart');
             const domainCanvas = document.getElementById('domainChart');
+            const refreshButton = document.getElementById('refresh-stats');
 
             function setText(element, value) {
                 if (element) {
@@ -401,7 +389,7 @@
                 setText(totalGs, formatCount(sumCounts(goldStandard)));
                 setText(totalDomains, formatCount(domains.length));
                 setText(avgQuality, overallF1 === null ? 'ND' : formatPercent(overallF1));
-                setMessage('Statistiche aggiornate da /api/db_stats e /api/gold_standard_urls.');
+                setMessage(`Statistiche aggiornate alle ${new Date().toLocaleTimeString('it-IT')}.`);
 
                 renderTable(domains, data);
 
@@ -432,6 +420,7 @@
 
             async function loadStats() {
                 setLoadingState();
+                UI.setBusy(refreshButton, true, 'Aggiornamento...');
 
                 try {
                     const response = await fetch('/api/db_stats', {
@@ -454,12 +443,14 @@
                     console.error(error);
                     const message = error instanceof Error ? error.message : 'Errore nel recupero delle statistiche';
                     setErrorState(message);
+                    UI.notify(message, 'error');
+                } finally {
+                    UI.setBusy(refreshButton, false, 'Aggiorna statistiche');
                 }
             }
 
+            refreshButton.addEventListener('click', loadStats);
             loadStats();
         });
     </script>
-
-</body>
-</html>
+{% endblock %}

@@ -1,22 +1,8 @@
-<!DOCTYPE html>
-<html lang="it">
-<head>
-    <meta charset="UTF-8">
-    <title>Gold Standard Builder</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-</head>
-<body class="dark-theme">
-    <header>
-        <a href="/" class="link-header-style">⬅Home Progetto</a>
-        <div class="system-status">
-            <span>Backend: <strong class="{{ status.backend }}">{{ status.backend }}</strong></span>
-            <span>DB: <strong class="{{ status.database }}">{{ status.database }}</strong></span>
-            <span>Ollama: <strong class="{{ status.ollama }}">{{ status.ollama }}</strong></span>
-            <span>Esperto: <strong class="{{ status.esperto }}">{{ status.esperto }}</strong></span>
-        </div>
-    </header>
+{% extends "base.html" %}
 
-    <main class="container">
+{% block title %}Gold Standard Builder{% endblock %}
+
+{% block content %}
         <header class="section-header">
             <h2>Gestione Gold Standard</h2>
             <p class="subtitle">Inserisci o modifica i testi di riferimento per la valutazione.</p>
@@ -59,6 +45,7 @@
                         <button type="submit" class="btn-primary">Salva nel DB</button>
                         <button type="reset" class="btn-secondary">Svuota</button>
                     </div>
+                    <p id="gold-message" class="inline-message" role="status" aria-live="polite"></p>
                 </form>
             </section>
 
@@ -76,11 +63,11 @@
                 </div>
             </section>
         </div>
-    </main>
+{% endblock %}
 
+{% block scripts %}
     <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const gsForm = document.getElementById('gs-form');
+{% endblock %}
             const submitButton = gsForm.querySelector('button[type="submit"]');
             const resetButton = gsForm.querySelector('button[type="reset"]');
             const urlInput = document.getElementById('gs-url');
@@ -94,9 +81,22 @@
             const selectInput = document.getElementById('gs-select');
             const editSelectedBtn = document.getElementById('edit-selected');
             const deleteSelectedBtn = document.getElementById('delete-selected');
+            const message = document.getElementById('gold-message');
 
             let allEntries = [];
             let editingUrl = '';
+            const draftKey = 'gold-standard-draft';
+
+            const setMessage = (text, type = '') => {
+                message.textContent = text;
+                message.className = `inline-message ${type}`;
+            };
+            const saveDraft = () => sessionStorage.setItem(draftKey, JSON.stringify({
+                url: urlInput.value,
+                domain: domainSelect.value,
+                html: htmlInput.value,
+                content: contentInput.value,
+            }));
 
             const normalize = (value) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
             const setSubmitState = () => {
@@ -149,6 +149,7 @@
 
                 editingUrl = entry.url || '';
                 setSubmitState();
+                setMessage('Documento caricato per la modifica.');
                 urlInput.focus();
             }
 
@@ -228,12 +229,12 @@
                 const goldText = contentInput.value.trim();
 
                 if (!urlValue || !goldText) {
-                    alert('Inserisci URL e testo Gold Standard prima di salvare.');
+                    setMessage('Inserisci URL e testo Gold Standard prima di salvare.', 'is-error');
                     return;
                 }
 
-                submitButton.disabled = true;
-                submitButton.textContent = editingUrl ? 'Aggiornamento...' : 'Salvataggio...';
+                UI.setBusy(submitButton, true, editingUrl ? 'Aggiornamento...' : 'Salvataggio...');
+                setMessage('Salvataggio in corso...');
 
                 try {
                     // se non abbiamo HTML, proviamo a scaricarlo
@@ -274,16 +275,24 @@
 
                     editingUrl = urlValue;
                     await loadEntries(domainSelect.value);
+                    sessionStorage.removeItem(draftKey);
+                    setMessage('Gold Standard salvato correttamente.', 'is-success');
+                    UI.notify('Gold Standard salvato.', 'success');
                 } catch (error) {
                     console.error(error);
-                    alert(`Errore durante il salvataggio: ${error.message}`);
+                    setMessage(`Errore durante il salvataggio: ${error.message}`, 'is-error');
                 } finally {
-                    submitButton.disabled = false;
-                    setSubmitState();
+                    UI.setBusy(submitButton, false, editingUrl ? 'Aggiorna nel DB' : 'Salva nel DB');
                 }
             }
 
             gsForm.addEventListener('submit', submitForm);
+            [urlInput, domainSelect, htmlInput, contentInput].forEach((element) => element.addEventListener('input', saveDraft));
+            resetButton.addEventListener('click', () => {
+                sessionStorage.removeItem(draftKey);
+                clearEditingState();
+                setMessage('Bozza rimossa.');
+            });
 
             loadHtmlBtn.addEventListener('click', async () => {
                 const urlValue = urlInput.value.trim();
@@ -392,9 +401,13 @@
             deleteSelectedBtn.addEventListener('click', async () => {
                 const url = selectInput.value;
                 if (!url) return;
-                const confirmed = window.confirm(`Eliminare il gold standard per:\n${url}?`);
+                const confirmed = await UI.confirmAction({
+                    title: 'Eliminare il Gold Standard?',
+                    message: `Il documento ${url} verrà eliminato in modo permanente.`,
+                    confirmLabel: 'Elimina',
+                });
                 if (!confirmed) return;
-                deleteSelectedBtn.disabled = true;
+                UI.setBusy(deleteSelectedBtn, true, 'Eliminazione...');
                 try {
                     const response = await fetch('/api/gold_standard', {
                         method: 'DELETE',
@@ -410,11 +423,13 @@
                         clearEditingState();
                     }
                     await loadEntries(domainSelect.value);
+                    setMessage('Gold Standard eliminato.', 'is-success');
+                    UI.notify('Gold Standard eliminato.', 'success');
                 } catch (err) {
                     console.error(err);
-                    alert(`Errore durante l'eliminazione: ${err.message}`);
+                    setMessage(`Errore durante l'eliminazione: ${err.message}`, 'is-error');
                 } finally {
-                    deleteSelectedBtn.disabled = false;
+                    UI.setBusy(deleteSelectedBtn, false, 'Elimina');
                 }
             });
 
@@ -432,6 +447,19 @@
             const params = new URLSearchParams(window.location.search);
             const initialDomain = params.get('domain');
             const initialUrl = params.get('url');
+
+            try {
+                const draft = JSON.parse(sessionStorage.getItem(draftKey));
+                if (draft && !initialUrl) {
+                    urlInput.value = draft.url || '';
+                    htmlInput.value = draft.html || '';
+                    contentInput.value = draft.content || '';
+                    if (draft.domain) domainSelect.value = draft.domain;
+                    setMessage('Bozza ripristinata dalla sessione.');
+                }
+            } catch (error) {
+                sessionStorage.removeItem(draftKey);
+            }
 
             if (initialDomain && Array.from(domainSelect.options).some((option) => option.value === initialDomain)) {
                 domainSelect.value = initialDomain;
@@ -457,6 +485,4 @@
             setSubmitState();
         });
     </script>
-
-</body>
-</html>
+{% endblock %}

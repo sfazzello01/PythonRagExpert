@@ -1,25 +1,17 @@
-<!DOCTYPE html>
-<html lang="it">
-<head>
-    <meta charset="UTF-8">
-    <title>Parser & Evaluation</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+{% extends "base.html" %}
+
+{% block title %}Parser e valutazione{% endblock %}
+
+{% block head %}
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
-</head>
-<body class="dark-theme">
-    <header>
-        <a href="/" class="link-header-style">⬅Home Progetto</a>
-        <div class="system-status">
-            <span>Backend: <strong class="{{ status.backend }}">{{ status.backend }}</strong></span>
-            <span>DB: <strong class="{{ status.database }}">{{ status.database }}</strong></span>
-            <span>Ollama: <strong class="{{ status.ollama }}">{{ status.ollama }}</strong></span>
-            <span>Esperto: <strong class="{{ status.esperto }}">{{ status.esperto }}</strong></span>
-        </div>
-    </header>
+{% endblock %}
 
-    <main class="container">
+{% block content %}
+        <section class="section-header">
         <h2>Testa il Parser</h2>
+            <p>Estrai il testo da una pagina e confrontalo con il Gold Standard disponibile.</p>
+        </section>
         
         <form id="parser-form" class="card main-form">
             <div class="form-group">
@@ -41,24 +33,26 @@
                     </select>
                 </div>
                 <button type="submit" class="btn-primary">Esegui Analisi</button>
+                <button type="button" id="retry-analysis" class="btn-secondary" hidden>Riprova</button>
             </div>
+            <p id="parser-message" class="inline-message" role="status" aria-live="polite"></p>
         </form>
 
-        <div id="results" class="results-grid">
+        <div id="results" class="results-grid parser-results">
             
-            <section class="card result-text">
+            <section class="card result-text result-text--parsed">
                 <h3>Testo Estratto</h3>
-                <div id="parsed-content" class="scroll-box markdown-content"></div>
+                <div id="parsed-content" class="scroll-box markdown-content" aria-live="polite"></div>
             </section>
 
-            <section class="card result-text">
+            <section class="card result-text result-text--html">
                 <h3>HTML Originale</h3>
-                <div id="html-content" class="scroll-box"></div>
+                <div id="html-content" class="scroll-box" aria-live="polite"></div>
             </section>
 
-            <section class="card result-text">
+            <section class="card result-text result-text--gold">
                 <h3>Testo GoldStandard</h3>
-                <div id="gold-content" class="scroll-box"></div>
+                <div id="gold-content" class="scroll-box" aria-live="polite"></div>
             </section>
 
             <section class="card result-eval">
@@ -95,8 +89,9 @@
             </section>
 
         </div>
-    </main>
+{% endblock %}
 
+{% block scripts %}
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const parserForm = document.getElementById('parser-form');
@@ -114,6 +109,8 @@
             const jaccardSimilarity = document.getElementById('jaccard-similarity');
             const llmScore = document.getElementById('llm-score');
             const llmFeedback = document.getElementById('llm-feedback');
+            const message = document.getElementById('parser-message');
+            const retryButton = document.getElementById('retry-analysis');
 
             function formatPercent(value) {
                 return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : 'ND';
@@ -129,6 +126,15 @@
 
             function setText(element, value) {
                 element.textContent = value;
+            }
+
+            function setMessage(value, type = '') {
+                setText(message, value);
+                message.className = `inline-message ${type}`;
+            }
+
+            function setLoading(element, loading) {
+                element.classList.toggle('is-loading', loading);
             }
 
             function renderMarkdown(element, value) {
@@ -150,6 +156,7 @@
             }
 
             function resetUI() {
+                [parsedBox, htmlBox, goldBox].forEach((element) => setLoading(element, true));
                 setText(parsedBox, 'Caricamento...');
                 setText(htmlBox, 'Caricamento...');
                 setText(goldBox, 'Caricamento...');
@@ -185,15 +192,16 @@
                 llmScore.className = 'badge';
             }
 
-            parserForm.addEventListener('submit', async (event) => {
-                event.preventDefault();
-
+            async function runAnalysis(event) {
+                if (event) event.preventDefault();
                 const urlValue = urlInput.value.trim();
                 const local = parserMode.value === 'Locale';
 
                 resetUI();
-                submitButton.disabled = true;
-                submitButton.textContent = 'Analisi in corso...';
+                retryButton.hidden = true;
+                UI.setBusy(submitButton, true, 'Analisi in corso');
+                setMessage('1/4 Estrazione del testo in corso...');
+                sessionStorage.setItem('parser-last-run', JSON.stringify({ urlValue, local }));
 
                 try {
                     const parseResponse = await fetch('/api/parse', {
@@ -210,6 +218,9 @@
 
                     renderMarkdown(parsedBox, parseData.parsed_text || 'Testo estratto non disponibile.');
                     setText(htmlBox, parseData.html_text || 'HTML non disponibile.');
+                    setLoading(parsedBox, false);
+                    setLoading(htmlBox, false);
+                    setMessage('2/4 Ricerca del Gold Standard...');
 
                     const gsResponse = await fetch(`/api/gold_standard?url=${encodeURIComponent(urlValue)}`);
                     const gsData = await gsResponse.json().catch(() => ({}));
@@ -219,11 +230,15 @@
                             goldBox,
                             gsData.detail || gsData.error || 'Nessun Gold Standard trovato per questo URL.'
                         );
+                        setLoading(goldBox, false);
+                        setMessage('Analisi completata: nessun Gold Standard disponibile.', 'is-success');
                         return;
                     }
 
                     const goldText = gsData.gold_text || '';
                     setText(goldBox, goldText || 'Gold Standard vuoto.');
+                    setLoading(goldBox, false);
+                    setMessage('3/4 Calcolo delle metriche...');
 
                     const evalPayload = {
                         parsed_text: parseData.parsed_text || '',
@@ -244,6 +259,7 @@
                     }
 
                     updateEvaluationUI(evalData);
+                    setMessage('4/4 Valutazione del Judge LLM...');
 
                     const judgeResponse = await fetch('/api/evaluate_judge', {
                         method: 'POST',
@@ -261,18 +277,31 @@
                             judgeData.detail || judgeData.error || 'Judge LLM non disponibile.'
                         );
                     }
+                    setMessage('Analisi completata.', 'is-success');
                 } catch (error) {
                     console.error(error);
+                    [parsedBox, htmlBox, goldBox].forEach((element) => setLoading(element, false));
                     updateJudgeUI(null, 'Errore durante la valutazione del Judge LLM.');
-                    alert('Si è verificato un errore: ' + error.message);
+                    setMessage(`Errore: ${error.message}`, 'is-error');
+                    retryButton.hidden = false;
                 } finally {
-                    submitButton.disabled = false;
-                    submitButton.textContent = 'Esegui Analisi';
+                    UI.setBusy(submitButton, false, 'Esegui Analisi');
                 }
-            });
+            }
+
+            parserForm.addEventListener('submit', runAnalysis);
+            retryButton.addEventListener('click', runAnalysis);
+
+            try {
+                const lastRun = JSON.parse(sessionStorage.getItem('parser-last-run'));
+                if (lastRun?.urlValue) {
+                    urlInput.value = lastRun.urlValue;
+                    parserMode.value = lastRun.local ? 'Locale' : 'OnLine';
+                }
+            } catch (error) {
+                sessionStorage.removeItem('parser-last-run');
+            }
         });
 
     </script>
-
-</body>
-</html>
+{% endblock %}

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Progetto laboratorio{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body class="dark-theme">
+    <header class="site-header">
+        <a href="/" class="link-header-style">Progetto laboratorio 2026</a>
+        <nav class="page-nav" aria-label="Navigazione principale">
+            <a href="/parser" class="{% if request.url.path == '/parser' %}is-active{% endif %}">Parser</a>
+            <a href="/gold" class="{% if request.url.path == '/gold' %}is-active{% endif %}">Gold Standard</a>
+            <a href="/stats" class="{% if request.url.path == '/stats' %}is-active{% endif %}">Statistiche</a>
+            <a href="/esperto" class="{% if request.url.path == '/esperto' %}is-active{% endif %}">Esperto</a>
+        </nav>
+        <div class="system-status" aria-label="Stato servizi">
+            <span>Backend <strong class="{{ status.backend | default('error') }}">{{ status.backend | default('Non disponibile') }}</strong></span>
+            <span>DB <strong class="{{ status.database | default('error') }}">{{ status.database | default('Non disponibile') }}</strong></span>
+            <span>Ollama <strong class="{{ status.ollama | default('error') }}">{{ status.ollama | default('Non disponibile') }}</strong></span>
+            <span>Esperto <strong class="{{ status.esperto | default('error') }}">{{ status.esperto | default('Non disponibile') }}</strong></span>
+        </div>
+    </header>
+
+    <main>{% block content %}{% endblock %}</main>
+    <div id="ui-notices" class="notices" aria-live="polite" aria-atomic="true"></div>
+    <dialog id="confirm-dialog" class="confirm-dialog">
+        <form method="dialog">
+            <h2 id="confirm-title">Conferma azione</h2>
+            <p id="confirm-message"></p>
+            <div class="dialog-actions">
+                <button value="cancel" class="btn-secondary">Annulla</button>
+                <button value="confirm" class="btn-primary">Conferma</button>
+            </div>
+        </form>
+    </dialog>
+    <script src="{{ url_for('static', path='ui.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

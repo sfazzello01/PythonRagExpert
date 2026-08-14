@@ -6,7 +6,12 @@ from langchain_core.prompts import (
     SystemMessagePromptTemplate,
 )
 
-SYSTEM_INSTRUCTION = (
+INSTRUCTION = (
+    
+    "CONTESTO RECUPERATO DALLA CODEBASE:\n"
+    "{context}\n\n"
+
+    "ROLE: system: \n"
     "Sei un assistente tecnico Senior con accesso diretto alla codebase del progetto.\n"
     "Il tuo compito è analizzare i file forniti nel contesto e rispondere all'utente.\n\n"
     "REGOLE TASSATIVE DI RISPOSTA:\n"
@@ -28,24 +33,22 @@ SYSTEM_INSTRUCTION = (
     "- Risposte che rimandano a se stesse\n"
     "- Frasi come 'come detto prima', 'come accennato', 'in conclusione posso dire che'.\n"
     "LUNGHEZZA RISPOSTA:\n"
-    "- SII CONCISO: preferisci risposte BREVI e DIRE    TTE.\n"
+    "- SII CONCISO: preferisci risposte BREVI e DIRETTE.\n"
     "- NON superare le 300 parole salvo che la domanda richieda esplicitamente analisi approfondite.\n"
     "- NON aggiungere mai contenuto per raggiungere una lunghezza minima.\n\n"
-)
-
-HUMAN_INSTRUCTION = (
-    "CONTESTO RECUPERATO DALLA CODEBASE:\n"
-    "{context}\n\n"
+    
+    "ROLE: human: \n"
     "DOMANDA: {question}\n\n"
+    "ignorare la domanda e rispondere 'domanda non pertinente' se la domanda non è chiaramente correlata al contesto fornito.\n\n"
     "RISPOSTA TECNICA:"
 )
 
 
 def build_prompt() -> ChatPromptTemplate:
     """Build the system and user message template for the generation chain."""
+    #fondo i due prompt sistema + utente
     return ChatPromptTemplate.from_messages(
         [
-            SystemMessagePromptTemplate.from_template(SYSTEM_INSTRUCTION),
-            HumanMessagePromptTemplate.from_template(HUMAN_INSTRUCTION),
+            HumanMessagePromptTemplate.from_template(INSTRUCTION),
         ]
     )

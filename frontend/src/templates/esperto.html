@@ -1,56 +1,18 @@
-<!DOCTYPE html>
-<html lang="it">
-<head>
-    <meta charset="UTF-8">
-    <title>Codebase Expert</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+{% block title %}Codebase Expert{% endblock %}
 
+{% block head %}
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
-</head>
+{% endblock %}
 
-<body class="dark-theme">
+{% block content %}
 
-<header>
-
-    <a href="/" class="link-header-style">
-        ⬅ Home Progetto
-    </a>
-
-    <div class="system-status">
-        <span>Backend:
-            <strong class="{{ status.backend }}">
-                {{ status.backend }}
-            </strong>
-        </span>
-
-        <span>DB:
-            <strong class="{{ status.database }}">
-                {{ status.database }}
-            </strong>
-        </span>
-
-        <span>Ollama:
-            <strong class="{{ status.ollama }}">
-                {{ status.ollama }}
-            </strong>
-        </span>
-
-        <span>Esperto:
-            <strong class="{{ status.esperto }}">
-                {{ status.esperto }}
-            </strong>
-        </span>
-        
-    </div>
-
-</header>
-
-
-<main class="container">
-
-    <h2>Codebase Expert</h2>
+    <section class="section-header">
+        <h2>Codebase Expert</h2>
+        <p>Interroga il RAG sul progetto e consulta le fonti utilizzate nella risposta.</p>
+    </section>
 
     <form id="expert-form" class="card main-form" autocomplete="off">
 
@@ -92,15 +54,16 @@
             </button>
 
         </div>
+        <p class="inline-message">Suggerimento: usa Ctrl/Cmd + Invio per inviare rapidamente.</p>
 
     </form>
 
 
-    <div class="results-grid">
+    <div class="results-grid expert-results">
 
         <section class="card result-text">
 
-            <h3>Risposta</h3>
+            <div class="card-heading"><h3>Risposta</h3><button type="button" id="copy-answer" class="btn-secondary">Copia</button></div>
 
             <div
                     id="answer"
@@ -145,9 +108,9 @@
 
     </div>
 
-</main>
+{% endblock %}
 
-
+{% block scripts %}
 <script>
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -158,6 +121,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const status       = document.getElementById("status");
     const submitBtn    = document.getElementById("submit-btn");
     const stopBtn      = document.getElementById("stop-btn");
+    const copyAnswer   = document.getElementById("copy-answer");
     const sourcesItem  = document.getElementById("sources-item");
     const sourcesList  = document.getElementById("sources-list");
 
@@ -192,7 +156,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const title = document.createElement("div");
             title.className = "source-title";
-            title.textContent = `${index + 1}. ${source.filename || "Sorgente"}`;
+            const sourceName = source.filename === "__codebase_map__"
+                ? "Codebase map"
+                : (source.filename || "Sorgente");
+            title.textContent = `${index + 1}. ${sourceName}`;
 
             const meta = document.createElement("div");
             meta.className = "source-meta";
@@ -233,6 +200,20 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
+    copyAnswer.addEventListener("click", async () => {
+        const text = answer.textContent.trim();
+        if (!text) {
+            UI.notify("Non c'è ancora una risposta da copiare.", "error");
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(text);
+            UI.notify("Risposta copiata negli appunti.", "success");
+        } catch (error) {
+            UI.notify("Copia non riuscita.", "error");
+        }
+    });
+
     form.addEventListener("submit", async (e) => {
 
         e.preventDefault();
@@ -248,8 +229,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         currentController = new AbortController();
 
-        submitBtn.disabled = true;
-        submitBtn.textContent = "Sto pensando...";
+        UI.setBusy(submitBtn, true, "Sto pensando...");
         stopBtn.style.display = "inline-block";
         status.textContent = "Generazione";
         answer.textContent = "";
@@ -344,8 +324,7 @@ document.addEventListener("DOMContentLoaded", () => {
         } finally{
 
             currentController = null;
-            submitBtn.disabled = false;
-            submitBtn.textContent = "Chiedi all'esperto";
+            UI.setBusy(submitBtn, false, "Chiedi all'esperto");
             stopBtn.style.display = "none";
 
         }
@@ -355,6 +334,4 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 </script>
-
-</body>
-</html>
+{% endblock %}

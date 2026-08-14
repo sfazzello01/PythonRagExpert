@@ -109,10 +109,12 @@ services:
       - ./docker-compose.yaml:/app/docker-compose.yaml:ro
       - ./hf_cache:/root/.cache/huggingface
       - ./esperto_state:/app/state
+      - ./esperto_debug:/app/debug
     env_file:
       - .env
     environment:
       - HF_HOME=/root/.cache/huggingface
+      - PROMPT_DEBUG_FILE=/app/debug/last_prompt.json
     deploy:
       resources:
         reservations:

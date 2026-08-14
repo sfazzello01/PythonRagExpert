@@ -13,7 +13,9 @@ from qdrant_client import AsyncQdrantClient, QdrantClient  # type: ignore
 from qdrant_client.http.exceptions import UnexpectedResponse  # type: ignore
 from qdrant_client.http.models import (  # type: ignore
     Distance,
+    FieldCondition,
     Filter,
+    MatchValue,
     MultiVectorComparator,
     MultiVectorConfig,
     PointStruct,
@@ -44,6 +46,35 @@ def get_sync_client() -> QdrantClient:
 def get_async_client() -> AsyncQdrantClient:
     """Create the asynchronous client used by request-time retrieval."""
     return AsyncQdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}")
+
+
+async def get_codebase_map(client: AsyncQdrantClient) -> Document | None:
+    """Retrieve the architecture map independently of query relevance."""
+    try:
+        records, _ = await client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.filename",
+                        match=MatchValue(value="__codebase_map__"),
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+    except Exception as error:
+        logger.error("Codebase map retrieval failed: %s: %s", type(error).__name__, error)
+        return None
+
+    if not records:
+        return None
+    payload = records[0].payload or {}
+    return Document(
+        page_content=payload.get("page_content", ""),
+        metadata=payload.get("metadata", {}),
+    )
 
 
 def wait_for_qdrant() -> QdrantClient:

@@ -1,53 +1,14 @@
-<!DOCTYPE html>
-<html lang="it">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Progetto laboratorio</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-</head>
+{% extends "base.html" %}
 
-<body class="dark-theme">
+{% block title %}Progetto laboratorio{% endblock %}
 
-    <header>
-        <a href="/" class="link-header-style">
-            Progetto laboratorio 2026
-        </a>
+{% block content %}
+        <section class="section-header">
+            <h2>Area di lavoro</h2>
+            <p>Seleziona uno strumento per gestire estrazione, valutazione e conoscenza della codebase.</p>
+        </section>
 
-        <div class="system-status">
-            <span>
-                Backend:
-                <strong class="{{ status.backend | default('ok') }}">
-                    {{ status.backend | default('Attivo') }}
-                </strong>
-            </span>
-
-            <span>
-                DB:
-                <strong class="{{ status.database | default('ok') }}">
-                    {{ status.database | default('Attivo') }}
-                </strong>
-            </span>
-
-            <span>
-                Ollama:
-                <strong class="{{ status.ollama | default('ok') }}">
-                    {{ status.ollama | default('Attivo') }}
-                </strong>
-            </span>
-
-            <span>
-                Esperto:
-                <strong class="{{ status.esperto | default('error') }}">
-                    {{ status.esperto | default('error') }}
-                </strong>
-            </span>
-        </div>
-    </header>
-
-    <main>
-
-        <section class="info-group">
+        <section class="info-group" aria-label="Autori del progetto">
             <ul>
                 <li>Simone Fazzello - 2071633</li>
                 <li>Filippo Sandri - 2108387</li>
@@ -91,8 +52,8 @@
 
         </nav>
 
-        <section class="domains">
-            <h2>Domini Supportati</h2>
+        <section class="domains" aria-labelledby="domains-title">
+            <h3 id="domains-title">Domini supportati</h3>
 
             <ul>
                 {% for domain in domains %}
@@ -101,7 +62,4 @@
             </ul>
         </section>
 
-    </main>
-
-</body>
-</html>
+{% endblock %}
