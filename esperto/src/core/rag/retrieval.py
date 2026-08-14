@@ -10,9 +10,31 @@ from qdrant_client import AsyncQdrantClient  # type: ignore
 from qdrant_client.http.models import FieldCondition, Filter, MatchValue  # type: ignore
 
 from ..services.embedding import encode_queries
-from ..services.qdrant import get_async_client, get_codebase_map, hybrid_search
-from ..shared.settings import K
+from ..services.qdrant import (
+    get_async_client,
+    get_codebase_map,
+    get_documents_by_chunk_ids,
+    hybrid_search,
+)
+from ..services.symbol_graph import SymbolGraph
+from ..shared.settings import (
+    K,
+    RAG_CONTEXT_MAX_CHARS,
+    RAG_CONTEXT_MAX_SOURCES,
+    SYMBOL_GRAPH_MAX_NEIGHBORS,
+)
 from .query import expand_queries
+
+_ARCHITECTURE_MARKERS = (
+    "architettura",
+    "architecture",
+    "panoramica",
+    "struttura del progetto",
+    "struttura progetto",
+    "quali servizi",
+    "intero progetto",
+    "intera codebase",
+)
 
 
 def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
@@ -25,11 +47,39 @@ def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
     return list(by_content.values())
 
 
+def _is_architectural_question(question: str) -> bool:
+    normalized = question.casefold()
+    return any(marker in normalized for marker in _ARCHITECTURE_MARKERS)
+
+
+def _document_sort_key(document: Document) -> tuple[int, float]:
+    return (
+        document.metadata.get("_context_priority", 0),
+        -document.metadata.get("_colbert_score", 0.0),
+    )
+
+
+def _limit_context_documents(documents: Iterable[Document]) -> list[Document]:
+    """Keep the most direct evidence within a stable source and character budget."""
+    selected: list[Document] = []
+    total_characters = 0
+    for document in sorted(documents, key=_document_sort_key):
+        if len(selected) >= RAG_CONTEXT_MAX_SOURCES:
+            break
+        document_size = len(document.page_content)
+        if selected and total_characters + document_size > RAG_CONTEXT_MAX_CHARS:
+            continue
+        selected.append(document)
+        total_characters += document_size
+    return selected
+
+
 class HybridRetriever:
     """Retrieve ranked codebase context from the BGE-M3 hybrid Qdrant index."""
 
     def __init__(self, client: AsyncQdrantClient | None = None):
         self._client = client or get_async_client()
+        self._symbol_graph = SymbolGraph()
 
     async def retrieve_with_sources(self, question: str) -> tuple[str, list[dict]]:
         """Build de-duplicated context and return the ranked source chunks."""
@@ -45,6 +95,9 @@ class HybridRetriever:
         unique_documents = _keep_highest_scoring(
             document for results in initial_results for document in results
         )
+        primary_contents = {document.page_content for document in unique_documents}
+        for document in unique_documents:
+            document.metadata["_context_priority"] = 0
 
         final_documents: list[Document] = []
         processed_files: set[str] = set()
@@ -70,21 +123,42 @@ class HybridRetriever:
                     ]
                 ),
             )
+            for same_file_document in same_file_documents:
+                same_file_document.metadata["_context_priority"] = (
+                    0 if same_file_document.page_content in primary_contents else 1
+                )
             final_documents.extend(same_file_documents or [document])
 
-        ranked_documents = sorted(
-            _keep_highest_scoring(final_documents),
-            key=lambda document: document.metadata["_colbert_score"],
-            reverse=True,
+        ranked_documents = sorted(_keep_highest_scoring(final_documents), key=_document_sort_key)
+        graph_relations = self._symbol_graph.related_chunks(
+            {
+                chunk_id
+                for document in ranked_documents
+                if (chunk_id := document.metadata.get("chunk_id"))
+            },
+            limit=SYMBOL_GRAPH_MAX_NEIGHBORS,
         )
-        codebase_map = await get_codebase_map(self._client)
+        graph_documents = await get_documents_by_chunk_ids(
+            self._client,
+            list(graph_relations),
+        )
+        for document in graph_documents:
+            document.metadata["_graph_relation"] = graph_relations[
+                document.metadata["chunk_id"]
+            ]
+            document.metadata["_context_priority"] = 2
         source_documents = [
             document
             for document in ranked_documents
             if document.metadata.get("filename") != "__codebase_map__"
         ]
-        if codebase_map:
-            source_documents.append(codebase_map)
+        source_documents.extend(graph_documents)
+        if _is_architectural_question(question):
+            codebase_map = await get_codebase_map(self._client)
+            if codebase_map:
+                codebase_map.metadata["_context_priority"] = 3
+                source_documents.append(codebase_map)
+        source_documents = _limit_context_documents(source_documents)
         sources = [
             {
                 "filename": document.metadata.get("filename"),
@@ -95,6 +169,8 @@ class HybridRetriever:
                 "end_line": document.metadata.get("end_line"),
                 "chunk_id": document.metadata.get("chunk_id"),
                 "score": document.metadata.get("_colbert_score"),
+                "_context_priority": document.metadata.get("_context_priority", 0),
+                "graph_relation": document.metadata.get("_graph_relation"),
                 "content": document.page_content,
             }
             for document in source_documents
@@ -107,3 +183,33 @@ class HybridRetriever:
         """Build a de-duplicated context ordered by descending ColBERT relevance."""
         context, _ = await self.retrieve_with_sources(question)
         return context
+
+    async def retrieve_many_with_sources(self, questions: list[str]) -> tuple[str, list[dict]]:
+        """Merge planner contexts and apply one final shared evidence budget."""
+        results = await asyncio.gather(
+            *(self.retrieve_with_sources(question) for question in questions[:2])
+        )
+        sources_by_key: dict[tuple[str | None, str | None], dict] = {}
+        for _, sources in results:
+            for source in sources:
+                key = (source.get("filename"), source.get("chunk_id"))
+                sources_by_key.setdefault(key, source)
+        sources = sorted(
+            sources_by_key.values(),
+            key=lambda source: (
+                source.get("_context_priority", 0),
+                -float(source.get("score") or 0.0),
+            ),
+        )
+        selected_sources: list[dict] = []
+        total_characters = 0
+        for source in sources:
+            if len(selected_sources) >= RAG_CONTEXT_MAX_SOURCES:
+                break
+            source_size = len(source["content"])
+            if selected_sources and total_characters + source_size > RAG_CONTEXT_MAX_CHARS:
+                continue
+            selected_sources.append(source)
+            total_characters += source_size
+        sources = selected_sources
+        return "\n\n---\n\n".join(source["content"] for source in sources), sources

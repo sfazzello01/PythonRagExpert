@@ -28,3 +28,4 @@ class ParseFrontendRequest(BaseModel):
 
 class ChatFrontendRequest(BaseModel):
     message: str
+    use_planner: bool = True

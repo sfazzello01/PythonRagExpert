@@ -11,6 +11,4 @@ def expand_queries(question: str) -> list[str]:
     return [
         cleaned,
         f"{cleaned} implementation function code",
-        f"{cleaned} architectural structure flow",
-        f"{cleaned} usage examples exception handling",
     ]

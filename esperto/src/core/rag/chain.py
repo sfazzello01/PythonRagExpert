@@ -13,6 +13,7 @@ from langchain_ollama import ChatOllama  # type: ignore
 from config import LLM_MODEL, OLLAMA_URL, TEMPERATURE
 
 from .prompts import build_prompt
+from .planner import plan_subquestions
 from .retrieval import HybridRetriever
 
 _retriever = HybridRetriever()
@@ -55,10 +56,11 @@ def build_rag_chain():
 rag_chain = build_rag_chain()
 
 
-async def stream_expert_response(question: str):
+async def stream_expert_response(question: str, use_planner: bool = True):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
-    context, sources = await _retriever.retrieve_with_sources(question)
-    yield f"SOURCES:{json.dumps({'sources': sources}, ensure_ascii=False)}\n"
+    subquestions = await plan_subquestions(question, _llm) if use_planner else [question]
+    context, sources = await _retriever.retrieve_many_with_sources(subquestions)
+    yield f"SOURCES:{json.dumps({'sources': sources, 'subquestions': subquestions}, ensure_ascii=False)}\n"
     prompt_value = build_prompt().invoke({"context": context, "question": question})
     _save_last_prompt(prompt_value)
     async for chunk in (_llm | StrOutputParser()).astream(prompt_value):

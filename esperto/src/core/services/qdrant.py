@@ -77,6 +77,37 @@ async def get_codebase_map(client: AsyncQdrantClient) -> Document | None:
     )
 
 
+async def get_documents_by_chunk_ids(
+    client: AsyncQdrantClient,
+    chunk_ids: list[str],
+) -> list[Document]:
+    """Retrieve indexed source chunks by their stable application-level IDs."""
+    if not chunk_ids:
+        return []
+    try:
+        records = await client.retrieve(
+            collection_name=QDRANT_COLLECTION,
+            ids=[_point_id(chunk_id) for chunk_id in chunk_ids],
+            with_payload=True,
+        )
+    except Exception as error:
+        logger.error("Graph chunk retrieval failed: %s: %s", type(error).__name__, error)
+        return []
+    documents_by_chunk_id = {
+        payload.get("metadata", {}).get("chunk_id"): Document(
+            page_content=payload.get("page_content", ""),
+            metadata=payload.get("metadata", {}),
+        )
+        for record in records
+        if (payload := record.payload)
+    }
+    return [
+        documents_by_chunk_id[chunk_id]
+        for chunk_id in chunk_ids
+        if chunk_id in documents_by_chunk_id
+    ]
+
+
 def wait_for_qdrant() -> QdrantClient:
     """Wait up to sixty seconds for Qdrant to accept collection requests."""
     client = get_sync_client()

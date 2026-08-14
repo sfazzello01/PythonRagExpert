@@ -39,7 +39,6 @@ INSTRUCTION = (
     
     "ROLE: human: \n"
     "DOMANDA: {question}\n\n"
-    "ignorare la domanda e rispondere 'domanda non pertinente' se la domanda non è chiaramente correlata al contesto fornito.\n\n"
     "RISPOSTA TECNICA:"
 )
 

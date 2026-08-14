@@ -14,6 +14,7 @@ from ..shared.settings import BATCH_SIZE, QDRANT_COLLECTION
 from .chunking import PythonASTContextualChunker, fallback_text_split
 from .discovery import iter_source_files
 from .summary import build_codebase_summary_documents
+from .symbol_graph import save_symbol_graph
 
 logger = logging.getLogger("EspertoIndexing")
 
@@ -55,6 +56,7 @@ def build_index() -> None:
     model = load_indexing_model()
     documents = _chunk_sources(source_files)
     documents.extend(build_codebase_summary_documents(source_files))
+    save_symbol_graph(source_files)
     logger.info("Avvio indicizzazione ibrida di %d chunk semantici.", len(documents))
 
     for start in range(0, len(documents), BATCH_SIZE):

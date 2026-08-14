@@ -15,6 +15,8 @@ from ..shared.settings import (
     INDEX_STATE_DIR,
     INDEX_STATE_FILE,
     QDRANT_COLLECTION,
+    SYMBOL_GRAPH_FILE,
+    SYMBOL_GRAPH_VERSION,
 )
 
 
@@ -40,13 +42,19 @@ def is_current(fingerprint: str) -> bool:
         state = json.loads(INDEX_STATE_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return False
-    return state.get("collection") == QDRANT_COLLECTION and state.get("fingerprint") == fingerprint
+    return (
+        state.get("collection") == QDRANT_COLLECTION
+        and state.get("fingerprint") == fingerprint
+        and state.get("symbol_graph_version") == SYMBOL_GRAPH_VERSION
+        and SYMBOL_GRAPH_FILE.exists()
+    )
 
 
 def clear() -> None:
     """Remove persistent state before rebuilding the collection."""
     INDEX_STATE_FILE.unlink(missing_ok=True)
     INDEX_COMPLETE_FILE.unlink(missing_ok=True)
+    SYMBOL_GRAPH_FILE.unlink(missing_ok=True)
 
 
 def save(fingerprint: str, source_file_count: int) -> None:
@@ -56,6 +64,7 @@ def save(fingerprint: str, source_file_count: int) -> None:
         "collection": QDRANT_COLLECTION,
         "fingerprint": fingerprint,
         "source_file_count": source_file_count,
+        "symbol_graph_version": SYMBOL_GRAPH_VERSION,
     }
     temporary_file = INDEX_STATE_FILE.with_suffix(".tmp")
     temporary_file.write_text(json.dumps(state, indent=2), encoding="utf-8")

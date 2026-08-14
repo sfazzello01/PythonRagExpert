@@ -32,6 +32,11 @@
 
         </div>
 
+        <label class="toggle-control" for="use-planner">
+            <input type="checkbox" id="use-planner" name="use-planner" checked>
+            <span>Planner per sotto-domande</span>
+        </label>
+
         <div class="form-row">
 
             <button
@@ -94,6 +99,14 @@
 
                 </div>
 
+                <div class="metric-item planner-item" id="planner-item" style="display:none;">
+
+                    <span>Sotto-domande</span>
+
+                    <ol id="planner-list" class="planner-list"></ol>
+
+                </div>
+
                 <div class="metric-item" id="sources-item" style="display:none;">
 
                     <span>Fonti</span>
@@ -122,6 +135,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const submitBtn    = document.getElementById("submit-btn");
     const stopBtn      = document.getElementById("stop-btn");
     const copyAnswer   = document.getElementById("copy-answer");
+    const usePlanner   = document.getElementById("use-planner");
+    const plannerItem  = document.getElementById("planner-item");
+    const plannerList  = document.getElementById("planner-list");
     const sourcesItem  = document.getElementById("sources-item");
     const sourcesList  = document.getElementById("sources-list");
 
@@ -194,6 +210,20 @@ document.addEventListener("DOMContentLoaded", () => {
         sourcesItem.style.display = "block";
     }
 
+    function displaySubquestions(subquestions){
+        plannerList.innerHTML = "";
+        if(!subquestions || subquestions.length === 0){
+            plannerItem.style.display = "none";
+            return;
+        }
+        subquestions.forEach((subquestion) => {
+            const item = document.createElement("li");
+            item.textContent = subquestion;
+            plannerList.appendChild(item);
+        });
+        plannerItem.style.display = "block";
+    }
+
     stopBtn.addEventListener("click", () => {
         if(currentController){
             currentController.abort();
@@ -233,6 +263,8 @@ document.addEventListener("DOMContentLoaded", () => {
         stopBtn.style.display = "inline-block";
         status.textContent = "Generazione";
         answer.textContent = "";
+        plannerItem.style.display = "none";
+        plannerList.innerHTML = "";
         sourcesItem.style.display = "none";
         sourcesList.innerHTML = "";
 
@@ -241,7 +273,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const response = await fetch("/ask", {
                 method:  "POST",
                 headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ message: question }),
+                body:    JSON.stringify({ message: question, use_planner: usePlanner.checked }),
                 signal:  currentController.signal
             });
 
@@ -274,6 +306,7 @@ document.addEventListener("DOMContentLoaded", () => {
                             try{
                                 const data = JSON.parse(firstLine.substring(8));
                                 displaySources(data.sources || data.files);
+                                displaySubquestions(data.subquestions);
                             } catch(err){
                                 console.warn("Header SOURCES non valido", err);
                             }
