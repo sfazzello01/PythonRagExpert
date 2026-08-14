@@ -37,6 +37,11 @@
             <span>Planner per sotto-domande</span>
         </label>
 
+        <label class="toggle-control" for="include-codebase-map">
+            <input type="checkbox" id="include-codebase-map" name="include-codebase-map">
+            <span>Includi codebase map</span>
+        </label>
+
         <div class="form-row">
 
             <button
@@ -136,6 +141,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const stopBtn      = document.getElementById("stop-btn");
     const copyAnswer   = document.getElementById("copy-answer");
     const usePlanner   = document.getElementById("use-planner");
+    const includeCodebaseMap = document.getElementById("include-codebase-map");
     const plannerItem  = document.getElementById("planner-item");
     const plannerList  = document.getElementById("planner-list");
     const sourcesItem  = document.getElementById("sources-item");
@@ -273,7 +279,11 @@ document.addEventListener("DOMContentLoaded", () => {
             const response = await fetch("/ask", {
                 method:  "POST",
                 headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ message: question, use_planner: usePlanner.checked }),
+                body:    JSON.stringify({
+                    message: question,
+                    use_planner: usePlanner.checked,
+                    include_codebase_map: includeCodebaseMap.checked
+                }),
                 signal:  currentController.signal
             });
 

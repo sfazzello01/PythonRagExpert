@@ -307,7 +307,11 @@ def ask_esperto(request: ChatFrontendRequest):
         full_url = f"{esperto_url}/ask"
         response = requests.post(
             full_url,
-            json={"message": message, "use_planner": request.use_planner},
+            json={
+                "message": message,
+                "use_planner": request.use_planner,
+                "include_codebase_map": request.include_codebase_map,
+            },
             timeout=(10, 300),
             stream=True,
         )

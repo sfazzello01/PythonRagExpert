@@ -56,10 +56,18 @@ def build_rag_chain():
 rag_chain = build_rag_chain()
 
 
-async def stream_expert_response(question: str, use_planner: bool = True):
+async def stream_expert_response(
+    question: str,
+    use_planner: bool = True,
+    include_codebase_map: bool = False,
+):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
     subquestions = await plan_subquestions(question, _llm) if use_planner else [question]
-    context, sources = await _retriever.retrieve_many_with_sources(subquestions)
+    context, sources = await _retriever.retrieve_many_with_sources(
+        subquestions,
+        question,
+        include_codebase_map=include_codebase_map,
+    )
     yield f"SOURCES:{json.dumps({'sources': sources, 'subquestions': subquestions}, ensure_ascii=False)}\n"
     prompt_value = build_prompt().invoke({"context": context, "question": question})
     _save_last_prompt(prompt_value)

@@ -26,6 +26,7 @@ app = FastAPI()
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=3, max_length=5000, description="User question to the expert")
     use_planner: bool = Field(default=True, description="Use the LLM retrieval planner")
+    include_codebase_map: bool = Field(default=False, description="Include the architecture codebase map")
 
 
 @app.get("/health")
@@ -90,7 +91,11 @@ async def ask_expert(request: ChatRequest) -> StreamingResponse:
     async def timeout_wrapper():
         """Wrapper with timeout to prevent indefinite streaming."""
         try:
-            async for chunk in stream_expert_response(message, use_planner=request.use_planner):
+            async for chunk in stream_expert_response(
+                message,
+                use_planner=request.use_planner,
+                include_codebase_map=request.include_codebase_map,
+            ):
                 yield chunk
         except asyncio.TimeoutError:
             logger.error(f"LLM inference timeout after {LLM_INFERENCE_TIMEOUT}s")

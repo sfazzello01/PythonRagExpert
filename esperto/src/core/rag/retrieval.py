@@ -15,6 +15,7 @@ from ..services.qdrant import (
     get_codebase_map,
     get_documents_by_chunk_ids,
     hybrid_search,
+    rerank_chunk_ids,
 )
 from ..services.symbol_graph import SymbolGraph
 from ..shared.settings import (
@@ -81,7 +82,11 @@ class HybridRetriever:
         self._client = client or get_async_client()
         self._symbol_graph = SymbolGraph()
 
-    async def retrieve_with_sources(self, question: str) -> tuple[str, list[dict]]:
+    async def retrieve_with_sources(
+        self,
+        question: str,
+        include_codebase_map: bool = False,
+    ) -> tuple[str, list[dict]]:
         """Build de-duplicated context and return the ranked source chunks."""
         queries = expand_queries(question)
         if not queries:
@@ -153,7 +158,7 @@ class HybridRetriever:
             if document.metadata.get("filename") != "__codebase_map__"
         ]
         source_documents.extend(graph_documents)
-        if _is_architectural_question(question):
+        if include_codebase_map or _is_architectural_question(question):
             codebase_map = await get_codebase_map(self._client)
             if codebase_map:
                 codebase_map.metadata["_context_priority"] = 3
@@ -184,23 +189,56 @@ class HybridRetriever:
         context, _ = await self.retrieve_with_sources(question)
         return context
 
-    async def retrieve_many_with_sources(self, questions: list[str]) -> tuple[str, list[dict]]:
-        """Merge planner contexts and apply one final shared evidence budget."""
+    async def retrieve_many_with_sources(
+        self,
+        questions: list[str],
+        original_question: str,
+        include_codebase_map: bool = False,
+    ) -> tuple[str, list[dict]]:
+        """Merge planner contexts, rerank candidates, and apply one shared budget."""
         results = await asyncio.gather(
-            *(self.retrieve_with_sources(question) for question in questions[:2])
+            *(
+                self.retrieve_with_sources(
+                    question,
+                    include_codebase_map=include_codebase_map,
+                )
+                for question in questions[:2]
+            )
         )
         sources_by_key: dict[tuple[str | None, str | None], dict] = {}
         for _, sources in results:
             for source in sources:
                 key = (source.get("filename"), source.get("chunk_id"))
                 sources_by_key.setdefault(key, source)
-        sources = sorted(
-            sources_by_key.values(),
-            key=lambda source: (
-                source.get("_context_priority", 0),
-                -float(source.get("score") or 0.0),
-            ),
+        candidate_chunk_ids = [
+            chunk_id
+            for source in sources_by_key.values()
+            if (chunk_id := source.get("chunk_id"))
+        ]
+        original_vectors = await asyncio.to_thread(encode_queries, [original_question])
+        reranked_documents = await rerank_chunk_ids(
+            self._client,
+            original_vectors[0],
+            candidate_chunk_ids,
         )
+        rerank_scores = {
+            document.metadata["chunk_id"]: document.metadata["_colbert_score"]
+            for document in reranked_documents
+        }
+        sources = list(sources_by_key.values())
+        if rerank_scores:
+            sources.sort(
+                key=lambda source: -float(rerank_scores.get(source.get("chunk_id"), -1.0)),
+            )
+        else:
+            sources.sort(
+                key=lambda source: (
+                    source.get("_context_priority", 0),
+                    -float(source.get("score") or 0.0),
+                ),
+            )
+        for source in sources:
+            source["final_score"] = rerank_scores.get(source.get("chunk_id"))
         selected_sources: list[dict] = []
         total_characters = 0
         for source in sources:

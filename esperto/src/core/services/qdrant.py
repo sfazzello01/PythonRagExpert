@@ -15,6 +15,7 @@ from qdrant_client.http.models import (  # type: ignore
     Distance,
     FieldCondition,
     Filter,
+    HasIdCondition,
     MatchValue,
     MultiVectorComparator,
     MultiVectorConfig,
@@ -231,3 +232,21 @@ async def hybrid_search(
         for point in response.points
         if point.score >= SEMANTIC_RELEVANCE_THRESHOLD
     ]
+
+
+async def rerank_chunk_ids(
+    client: AsyncQdrantClient,
+    query_vectors: QueryVectors,
+    chunk_ids: list[str],
+) -> list[Document]:
+    """Rerank already retrieved chunks against the original user question."""
+    if not chunk_ids:
+        return []
+    return await hybrid_search(
+        client,
+        query_vectors,
+        limit=len(chunk_ids),
+        query_filter=Filter(
+            must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])]
+        ),
+    )
