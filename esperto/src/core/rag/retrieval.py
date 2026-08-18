@@ -196,13 +196,21 @@ class HybridRetriever:
         include_codebase_map: bool = False,
     ) -> tuple[str, list[dict]]:
         """Merge planner contexts, rerank candidates, and apply one shared budget."""
+        retrieval_questions = [
+            original_question,
+            *(
+                question
+                for question in questions
+                if question.casefold() != original_question.casefold()
+            ),
+        ][:4]
         results = await asyncio.gather(
             *(
                 self.retrieve_with_sources(
                     question,
                     include_codebase_map=include_codebase_map,
                 )
-                for question in questions[:2]
+                for question in retrieval_questions
             )
         )
         sources_by_key: dict[tuple[str | None, str | None], dict] = {}

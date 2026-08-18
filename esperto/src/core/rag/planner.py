@@ -11,7 +11,10 @@ from ..shared.text import sanitize_text
 logger = logging.getLogger("EspertoPlanner")
 
 _PLANNER_PROMPT = """Sei un planner per il retrieval di una codebase.
-Scomponi la domanda in una o due sotto-domande tecniche, indipendenti e mirate al codice.
+Genera sotto-domande solo se migliorano chiaramente il retrieval.
+Non introdurre ipotesi, nomi di file, simboli o tecnologie non presenti nella domanda.
+Ogni sotto-domanda deve essere rispondibile cercando nella codebase.
+Preferisci una o due sotto-domande; usa quattro solo per richieste realmente multi-parte.
 Mantieni una sola domanda se e gia specifica. Non rispondere alla domanda.
 Restituisci esclusivamente JSON valido: {{"subquestions":["..."]}}.
 
@@ -36,7 +39,7 @@ def parse_subquestions(content: str, original_question: str) -> list[str]:
 
     questions: list[str] = []
     seen: set[str] = set()
-    for candidate in candidates[:2]:
+    for candidate in candidates[:4]:
         if not isinstance(candidate, str):
             continue
         question = sanitize_text(candidate).strip()
