@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
-from ..shared.settings import SYMBOL_GRAPH_FILE, SYMBOL_GRAPH_VERSION
+from ..shared.settings import (
+    SYMBOL_GRAPH_FILE,
+    SYMBOL_GRAPH_MAX_DEPTH,
+    SYMBOL_GRAPH_VERSION,
+)
 
 logger = logging.getLogger("EspertoSymbolGraph")
 
 
 class SymbolGraph:
-    """Resolve one-hop callers and callees to their enclosing indexed chunks."""
+    """Resolve related callers and callees to their enclosing indexed chunks."""
 
     def __init__(self, graph_path: Path = SYMBOL_GRAPH_FILE):
         self._graph_path = graph_path
@@ -23,17 +27,34 @@ class SymbolGraph:
         self._neighbors: dict[str, list[tuple[str, str]]] = {}
 
     def related_chunks(self, chunk_ids: set[str], limit: int) -> dict[str, str]:
-        """Return directly connected chunk IDs mapped to their graph relation."""
+        """Return related chunk IDs reached within the configured graph depth."""
         self._reload_if_needed()
         related: dict[str, str] = {}
-        for chunk_id in chunk_ids:
-            for symbol_id in self._chunk_to_symbols.get(chunk_id, set()):
-                for neighbor_id, relation in self._neighbors.get(symbol_id, []):
-                    neighbor_chunk_id = self._chunk_for_symbol(neighbor_id)
-                    if neighbor_chunk_id and neighbor_chunk_id not in chunk_ids:
-                        related.setdefault(neighbor_chunk_id, relation)
-                        if len(related) >= limit:
-                            return related
+        queue = deque(
+            (symbol_id, 0, "")
+            for chunk_id in chunk_ids
+            for symbol_id in self._chunk_to_symbols.get(chunk_id, set())
+        )
+        visited_symbols = {symbol_id for symbol_id, _, _ in queue}
+        while queue and len(related) < limit:
+            symbol_id, depth, relation_path = queue.popleft()
+            if depth >= SYMBOL_GRAPH_MAX_DEPTH:
+                continue
+            for neighbor_id, relation in self._neighbors.get(symbol_id, []):
+                if neighbor_id in visited_symbols:
+                    continue
+                visited_symbols.add(neighbor_id)
+                next_depth = depth + 1
+                next_relation_path = (
+                    f"{relation_path}->{relation}" if relation_path else relation
+                )
+                neighbor_chunk_id = self._chunk_for_symbol(neighbor_id)
+                if neighbor_chunk_id and neighbor_chunk_id not in chunk_ids:
+                    related.setdefault(neighbor_chunk_id, next_relation_path)
+                    if len(related) >= limit:
+                        break
+                if next_depth < SYMBOL_GRAPH_MAX_DEPTH:
+                    queue.append((neighbor_id, next_depth, next_relation_path))
         return related
 
     def _reload_if_needed(self) -> None:

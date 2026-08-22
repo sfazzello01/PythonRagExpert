@@ -231,3 +231,5 @@ hf_cache/
 
 # Esperto persistent index state
 esperto_state/
+
+esperto_debug/

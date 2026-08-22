@@ -18,6 +18,12 @@ from .retrieval import HybridRetriever
 
 _retriever = HybridRetriever()
 _llm = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_URL, temperature=TEMPERATURE)
+_planner_llm = ChatOllama(
+    model=LLM_MODEL,
+    base_url=OLLAMA_URL,
+    temperature=TEMPERATURE,
+    format="json",
+)
 _generation_chain = build_prompt() | _llm | StrOutputParser()
 
 
@@ -62,7 +68,11 @@ async def stream_expert_response(
     include_codebase_map: bool = False,
 ):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
-    subquestions = await plan_subquestions(question, _llm) if use_planner else [question]
+    subquestions = (
+        await plan_subquestions(question, _planner_llm)
+        if use_planner
+        else [question]
+    )
     context, sources = await _retriever.retrieve_many_with_sources(
         subquestions,
         question,
