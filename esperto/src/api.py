@@ -27,6 +27,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=3, max_length=5000, description="User question to the expert")
     use_planner: bool = Field(default=True, description="Use the LLM retrieval planner")
     include_codebase_map: bool = Field(default=False, description="Include the architecture codebase map")
+    use_reasoning: bool = Field(default=False, description="Stream the model reasoning before the answer")
 
 
 @app.get("/health")
@@ -95,6 +96,7 @@ async def ask_expert(request: ChatRequest) -> StreamingResponse:
                 message,
                 use_planner=request.use_planner,
                 include_codebase_map=request.include_codebase_map,
+                use_reasoning=request.use_reasoning,
             ):
                 yield chunk
         except asyncio.TimeoutError:

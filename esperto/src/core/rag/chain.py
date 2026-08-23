@@ -17,12 +17,23 @@ from .planner import plan_subquestions
 from .retrieval import HybridRetriever
 
 _retriever = HybridRetriever()
-_llm = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_URL, temperature=TEMPERATURE)
+def _create_response_llm(use_reasoning: bool) -> ChatOllama:
+    """Create a response model configured for the current user request."""
+    return ChatOllama(
+        model=LLM_MODEL,
+        base_url=OLLAMA_URL,
+        temperature=TEMPERATURE,
+        reasoning=use_reasoning,
+    )
+
+
+_llm = _create_response_llm(False)
 _planner_llm = ChatOllama(
     model=LLM_MODEL,
     base_url=OLLAMA_URL,
     temperature=TEMPERATURE,
     format="json",
+    reasoning=False,
 )
 _generation_chain = build_prompt() | _llm | StrOutputParser()
 
@@ -66,6 +77,7 @@ async def stream_expert_response(
     question: str,
     use_planner: bool = True,
     include_codebase_map: bool = False,
+    use_reasoning: bool = False,
 ):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
     subquestions = (
@@ -78,8 +90,15 @@ async def stream_expert_response(
         question,
         include_codebase_map=include_codebase_map,
     )
-    yield f"SOURCES:{json.dumps({'sources': sources, 'subquestions': subquestions}, ensure_ascii=False)}\n"
+    yield json.dumps(
+        {"type": "sources", "data": {"sources": sources, "subquestions": subquestions}},
+        ensure_ascii=False,
+    ) + "\n"
     prompt_value = build_prompt().invoke({"context": context, "question": question})
     _save_last_prompt(prompt_value)
-    async for chunk in (_llm | StrOutputParser()).astream(prompt_value):
-        yield chunk
+    async for chunk in _create_response_llm(use_reasoning).astream(prompt_value):
+        reasoning = chunk.additional_kwargs.get("reasoning_content", "")
+        if reasoning:
+            yield json.dumps({"type": "reasoning", "data": reasoning}, ensure_ascii=False) + "\n"
+        if chunk.content:
+            yield json.dumps({"type": "answer", "data": chunk.content}, ensure_ascii=False) + "\n"

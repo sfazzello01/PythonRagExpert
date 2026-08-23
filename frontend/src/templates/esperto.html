@@ -42,6 +42,11 @@
             <span>Includi codebase map</span>
         </label>
 
+        <label class="toggle-control" for="use-reasoning">
+            <input type="checkbox" id="use-reasoning" name="use-reasoning">
+            <span>Ragionamento</span>
+        </label>
+
         <div class="form-row">
 
             <button
@@ -64,7 +69,9 @@
             </button>
 
         </div>
-        <p class="inline-message">Suggerimento: usa Ctrl/Cmd + Invio per inviare rapidamente.</p>
+        <p class="inline-message">Suggerimenti:</p>
+        <p class="inline-message">usa Ctrl/Cmd + Invio per inviare rapidamente.</p>
+        <p class="inline-message">il ragionamento può migliorare la risposta, ma aumenta sensibilmente la latenza</p>
 
     </form>
 
@@ -75,12 +82,9 @@
 
             <div class="card-heading"><h3>Risposta</h3><button type="button" id="copy-answer" class="btn-secondary">Copia</button></div>
 
-            <div
-                    id="answer"
-                    class="scroll-box markdown-content">
-
-                Fai una domanda alla codebase.
-
+            <div id="answer" class="scroll-box markdown-content">
+                <div id="reasoning" class="reasoning-content" hidden></div>
+                <div id="answer-output">Fai una domanda alla codebase.</div>
             </div>
 
         </section>
@@ -136,12 +140,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const form         = document.getElementById("expert-form");
     const textarea     = document.getElementById("question");
     const answer       = document.getElementById("answer");
+    const answerOutput = document.getElementById("answer-output");
+    const reasoning    = document.getElementById("reasoning");
     const status       = document.getElementById("status");
     const submitBtn    = document.getElementById("submit-btn");
     const stopBtn      = document.getElementById("stop-btn");
     const copyAnswer   = document.getElementById("copy-answer");
     const usePlanner   = document.getElementById("use-planner");
     const includeCodebaseMap = document.getElementById("include-codebase-map");
+    const useReasoning = document.getElementById("use-reasoning");
     const plannerItem  = document.getElementById("planner-item");
     const plannerList  = document.getElementById("planner-list");
     const sourcesItem  = document.getElementById("sources-item");
@@ -153,13 +160,13 @@ document.addEventListener("DOMContentLoaded", () => {
         try{
             if(window.marked){
                 const html = marked.parse(text, { breaks:true, mangle:false, headerIds:false });
-                answer.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : html;
+                answerOutput.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : html;
             } else {
-                answer.textContent = text;
+                answerOutput.textContent = text;
             }
         } catch(err){
             console.error("Errore nel rendering della risposta", err);
-            answer.textContent = text;
+            answerOutput.textContent = text;
         }
     }
 
@@ -237,7 +244,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     copyAnswer.addEventListener("click", async () => {
-        const text = answer.textContent.trim();
+        const text = answerOutput.textContent.trim();
         if (!text) {
             UI.notify("Non c'è ancora una risposta da copiare.", "error");
             return;
@@ -257,7 +264,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const question = textarea.value.trim();
 
         if(!question){
-            answer.textContent = "Scrivi una domanda prima di inviare.";
+            answerOutput.textContent = "Scrivi una domanda prima di inviare.";
             status.textContent = "Pronto";
             textarea.focus();
             return;
@@ -268,7 +275,9 @@ document.addEventListener("DOMContentLoaded", () => {
         UI.setBusy(submitBtn, true, "Sto pensando...");
         stopBtn.style.display = "inline-block";
         status.textContent = "Generazione";
-        answer.textContent = "";
+        answerOutput.textContent = "";
+        reasoning.textContent = "";
+        reasoning.hidden = true;
         plannerItem.style.display = "none";
         plannerList.innerHTML = "";
         sourcesItem.style.display = "none";
@@ -282,7 +291,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 body:    JSON.stringify({
                     message: question,
                     use_planner: usePlanner.checked,
-                    include_codebase_map: includeCodebaseMap.checked
+                    include_codebase_map: includeCodebaseMap.checked,
+                    use_reasoning: useReasoning.checked
                 }),
                 signal:  currentController.signal
             });
@@ -295,44 +305,45 @@ document.addEventListener("DOMContentLoaded", () => {
             const reader  = response.body.getReader();
             const decoder = new TextDecoder();
 
-            let sourceBuffer   = "";
             let answerText     = "";
-            let sourcesHandled = false;
+            let reasoningText  = "";
+            let eventBuffer    = "";
+            let answerStarted  = false;
 
             function processChunk(text){
                 if(!text){
                     return;
                 }
 
-                if(!sourcesHandled){
-                    sourceBuffer += text;
-                    const nl = sourceBuffer.indexOf("\n");
-
-                    if(nl !== -1){
-                        const firstLine = sourceBuffer.substring(0, nl);
-                        const remainder = sourceBuffer.substring(nl + 1);
-
-                        if(firstLine.startsWith("SOURCES:")){
-                            try{
-                                const data = JSON.parse(firstLine.substring(8));
-                                displaySources(data.sources || data.files);
-                                displaySubquestions(data.subquestions);
-                            } catch(err){
-                                console.warn("Header SOURCES non valido", err);
-                            }
-                            answerText += remainder;
-                        } else {
-                            answerText += sourceBuffer;
-                        }
-
-                        sourceBuffer = "";
-                        sourcesHandled = true;
+                eventBuffer += text;
+                const lines = eventBuffer.split("\n");
+                eventBuffer = lines.pop();
+                lines.forEach((line) => {
+                    if(!line){
+                        return;
                     }
-                } else {
-                    answerText += text;
-                }
-
-                renderMarkdown(answerText);
+                    try{
+                        const event = JSON.parse(line);
+                        if(event.type === "sources"){
+                            displaySources(event.data.sources || event.data.files);
+                            displaySubquestions(event.data.subquestions);
+                        } else if(event.type === "reasoning" && !answerStarted){
+                            reasoningText += event.data;
+                            reasoning.textContent = reasoningText;
+                            reasoning.hidden = false;
+                        } else if(event.type === "answer"){
+                            if(!answerStarted){
+                                answerStarted = true;
+                                reasoning.textContent = "";
+                                reasoning.hidden = true;
+                            }
+                            answerText += event.data;
+                            renderMarkdown(answerText);
+                        }
+                    } catch(err){
+                        console.warn("Evento stream non valido", err);
+                    }
+                });
                 answer.scrollTop = answer.scrollHeight;
             }
 
@@ -347,11 +358,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 processChunk(decoder.decode(value, { stream: true }));
             }
 
-            if(!sourcesHandled && sourceBuffer){
-                answerText += sourceBuffer;
-                renderMarkdown(answerText);
-            }
-
             status.textContent = "Completata";
 
         } catch(err){
@@ -360,7 +366,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 status.textContent = "Interrotta";
             } else {
                 console.error(err);
-                answer.textContent = err.message;
+                answerOutput.textContent = err.message;
                 status.textContent = "Errore";
             }
 

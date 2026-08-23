@@ -131,6 +131,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .expert-results { grid-template-columns: minmax(0, 2.2fr) minmax(300px, 0.8fr); align-items: start; }
 .expert-results .result-eval { position: sticky; top: 5.5rem; }
 .markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4 { margin: 0.6rem 0 0.4rem; color: #f7fbf8; }
+.reasoning-content { margin-bottom: 1rem; color: #91a097; font-family: Georgia, serif; font-style: italic; white-space: pre-wrap; }
 .markdown-content p { margin: 0.5rem 0; }
 .markdown-content ul, .markdown-content ol { margin: 0.5rem 0; padding-left: 1.2rem; }
 .markdown-content li { padding: 0.2rem 0; border: 0; }

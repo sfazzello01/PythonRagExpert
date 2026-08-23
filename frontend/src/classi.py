@@ -30,3 +30,4 @@ class ChatFrontendRequest(BaseModel):
     message: str
     use_planner: bool = True
     include_codebase_map: bool = False
+    use_reasoning: bool = False
