@@ -37,11 +37,6 @@
             <span>Planner per sotto-domande</span>
         </label>
 
-        <label class="toggle-control" for="include-codebase-map">
-            <input type="checkbox" id="include-codebase-map" name="include-codebase-map">
-            <span>Includi codebase map</span>
-        </label>
-
         <label class="toggle-control" for="use-reasoning">
             <input type="checkbox" id="use-reasoning" name="use-reasoning">
             <span>Ragionamento</span>
@@ -147,7 +142,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const stopBtn      = document.getElementById("stop-btn");
     const copyAnswer   = document.getElementById("copy-answer");
     const usePlanner   = document.getElementById("use-planner");
-    const includeCodebaseMap = document.getElementById("include-codebase-map");
     const useReasoning = document.getElementById("use-reasoning");
     const plannerItem  = document.getElementById("planner-item");
     const plannerList  = document.getElementById("planner-list");
@@ -185,9 +179,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const title = document.createElement("div");
             title.className = "source-title";
-            const sourceName = source.filename === "__codebase_map__"
-                ? "Codebase map"
-                : (source.filename || "Sorgente");
+            const sourceName = source.filename || "Sorgente";
             title.textContent = `${index + 1}. ${sourceName}`;
 
             const meta = document.createElement("div");
@@ -291,7 +283,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 body:    JSON.stringify({
                     message: question,
                     use_planner: usePlanner.checked,
-                    include_codebase_map: includeCodebaseMap.checked,
                     use_reasoning: useReasoning.checked
                 }),
                 signal:  currentController.signal

@@ -13,10 +13,8 @@ from qdrant_client import AsyncQdrantClient, QdrantClient  # type: ignore
 from qdrant_client.http.exceptions import UnexpectedResponse  # type: ignore
 from qdrant_client.http.models import (  # type: ignore
     Distance,
-    FieldCondition,
     Filter,
     HasIdCondition,
-    MatchValue,
     MultiVectorComparator,
     MultiVectorConfig,
     PointStruct,
@@ -47,35 +45,6 @@ def get_sync_client() -> QdrantClient:
 def get_async_client() -> AsyncQdrantClient:
     """Create the asynchronous client used by request-time retrieval."""
     return AsyncQdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}")
-
-
-async def get_codebase_map(client: AsyncQdrantClient) -> Document | None:
-    """Retrieve the architecture map independently of query relevance."""
-    try:
-        records, _ = await client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="metadata.filename",
-                        match=MatchValue(value="__codebase_map__"),
-                    )
-                ]
-            ),
-            limit=1,
-            with_payload=True,
-        )
-    except Exception as error:
-        logger.error("Codebase map retrieval failed: %s: %s", type(error).__name__, error)
-        return None
-
-    if not records:
-        return None
-    payload = records[0].payload or {}
-    return Document(
-        page_content=payload.get("page_content", ""),
-        metadata=payload.get("metadata", {}),
-    )
 
 
 async def get_documents_by_chunk_ids(
@@ -181,44 +150,18 @@ def upsert_encoded_documents(
             client.upsert(collection_name=QDRANT_COLLECTION, points=[point])
 
 
-async def hybrid_search(
-    client: AsyncQdrantClient,
-    query_vectors: QueryVectors,
-    limit: int,
-    query_filter: Optional[Filter] = None,
-) -> list[Document]:
-    """Run dense+sparse prefetch followed by ColBERT MaxSim reranking."""
+async def _query_colbert(client: AsyncQdrantClient, **kwargs) -> list[Document]:
+    """Run a ColBERT query_points call with the shared timeout/error handling."""
     try:
         response = await asyncio.wait_for(
-            client.query_points(
-                collection_name=QDRANT_COLLECTION,
-                prefetch=[
-                    Prefetch(
-                        query=query_vectors.dense,
-                        using="dense",
-                        limit=PREFETCH_LIMIT,
-                        filter=query_filter,
-                    ),
-                    Prefetch(
-                        query=query_vectors.sparse,
-                        using="sparse",
-                        limit=PREFETCH_LIMIT,
-                        filter=query_filter,
-                    ),
-                ],
-                query=query_vectors.colbert,
-                using="colbert",
-                limit=limit,
-                query_filter=query_filter,
-                with_payload=True,
-            ),
+            client.query_points(collection_name=QDRANT_COLLECTION, using="colbert", **kwargs),
             timeout=QDRANT_QUERY_TIMEOUT,
         )
     except asyncio.TimeoutError:
         logger.error("Qdrant query timeout after %ss", QDRANT_QUERY_TIMEOUT)
         return []
     except Exception as error:
-        logger.error("Hybrid search failed: %s: %s", type(error).__name__, error)
+        logger.error("Qdrant query failed: %s: %s", type(error).__name__, error)
         return []
 
     return [
@@ -234,19 +177,40 @@ async def hybrid_search(
     ]
 
 
+async def hybrid_search(
+    client: AsyncQdrantClient,
+    query_vectors: QueryVectors,
+    limit: int,
+    query_filter: Optional[Filter] = None,
+) -> list[Document]:
+    """Run dense+sparse prefetch followed by ColBERT MaxSim reranking."""
+    return await _query_colbert(
+        client,
+        prefetch=[
+            Prefetch(query=query_vectors.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter),
+            Prefetch(query=query_vectors.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter),
+        ],
+        query=query_vectors.colbert,
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=True,
+    )
+
+
 async def rerank_chunk_ids(
     client: AsyncQdrantClient,
     query_vectors: QueryVectors,
     chunk_ids: list[str],
 ) -> list[Document]:
-    """Rerank already retrieved chunks against the original user question."""
+    """Score already-known chunk IDs with ColBERT only, skipping the dense+sparse prefetch."""
     if not chunk_ids:
         return []
-    return await hybrid_search(
+    return await _query_colbert(
         client,
-        query_vectors,
+        query=query_vectors.colbert,
         limit=len(chunk_ids),
         query_filter=Filter(
             must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])]
         ),
+        with_payload=True,
     )

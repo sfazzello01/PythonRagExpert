@@ -12,7 +12,6 @@ from qdrant_client.http.models import FieldCondition, Filter, MatchValue  # type
 from ..services.embedding import encode_queries
 from ..services.qdrant import (
     get_async_client,
-    get_codebase_map,
     get_documents_by_chunk_ids,
     hybrid_search,
     rerank_chunk_ids,
@@ -26,17 +25,6 @@ from ..shared.settings import (
 )
 from .query import expand_queries
 
-_ARCHITECTURE_MARKERS = (
-    "architettura",
-    "architecture",
-    "panoramica",
-    "struttura del progetto",
-    "struttura progetto",
-    "quali servizi",
-    "intero progetto",
-    "intera codebase",
-)
-
 
 def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
     """Deduplicate equal chunks while retaining their best ColBERT score."""
@@ -46,11 +34,6 @@ def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
         if previous is None or document.metadata["_colbert_score"] > previous.metadata["_colbert_score"]:
             by_content[document.page_content] = document
     return list(by_content.values())
-
-
-def _is_architectural_question(question: str) -> bool:
-    normalized = question.casefold()
-    return any(marker in normalized for marker in _ARCHITECTURE_MARKERS)
 
 
 def _document_sort_key(document: Document) -> tuple[int, float]:
@@ -85,7 +68,6 @@ class HybridRetriever:
     async def retrieve_with_sources(
         self,
         question: str,
-        include_codebase_map: bool = False,
     ) -> tuple[str, list[dict]]:
         """Build de-duplicated context and return the ranked source chunks."""
         queries = expand_queries(question)
@@ -108,7 +90,7 @@ class HybridRetriever:
         processed_files: set[str] = set()
         for document in unique_documents:
             filename = document.metadata.get("filename")
-            if not filename or filename == "__codebase_map__":
+            if not filename:
                 final_documents.append(document)
                 continue
             if filename in processed_files:
@@ -152,17 +134,8 @@ class HybridRetriever:
                 document.metadata["chunk_id"]
             ]
             document.metadata["_context_priority"] = 2
-        source_documents = [
-            document
-            for document in ranked_documents
-            if document.metadata.get("filename") != "__codebase_map__"
-        ]
+        source_documents = list(ranked_documents)
         source_documents.extend(graph_documents)
-        if include_codebase_map or _is_architectural_question(question):
-            codebase_map = await get_codebase_map(self._client)
-            if codebase_map:
-                codebase_map.metadata["_context_priority"] = 3
-                source_documents.append(codebase_map)
         source_documents = _limit_context_documents(source_documents)
         sources = [
             {
@@ -193,7 +166,6 @@ class HybridRetriever:
         self,
         questions: list[str],
         original_question: str,
-        include_codebase_map: bool = False,
     ) -> tuple[str, list[dict]]:
         """Merge planner contexts, rerank candidates, and apply one shared budget."""
         retrieval_questions = [
@@ -206,10 +178,7 @@ class HybridRetriever:
         ][:4]
         results = await asyncio.gather(
             *(
-                self.retrieve_with_sources(
-                    question,
-                    include_codebase_map=include_codebase_map,
-                )
+                self.retrieve_with_sources(question)
                 for question in retrieval_questions
             )
         )

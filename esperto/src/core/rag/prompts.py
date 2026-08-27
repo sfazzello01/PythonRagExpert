@@ -33,8 +33,7 @@ INSTRUCTION = (
     "- Risposte che rimandano a se stesse\n"
     "- Frasi come 'come detto prima', 'come accennato', 'in conclusione posso dire che'.\n"
     "LUNGHEZZA RISPOSTA:\n"
-    "- SII CONCISO: preferisci risposte BREVI e DIRETTE.\n"
-    "- NON superare le 300 parole salvo che la domanda richieda esplicitamente analisi approfondite.\n"
+    "- SII conciso: preferisci risposte precise e dirette.\n"
     "- NON aggiungere mai contenuto per raggiungere una lunghezza minima.\n\n"
     
     "ROLE: human: \n"

@@ -310,7 +310,6 @@ def ask_esperto(request: ChatFrontendRequest):
             json={
                 "message": message,
                 "use_planner": request.use_planner,
-                "include_codebase_map": request.include_codebase_map,
                 "use_reasoning": request.use_reasoning,
             },
             timeout=(10, 300),

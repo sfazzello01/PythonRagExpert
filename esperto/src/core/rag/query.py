@@ -9,6 +9,6 @@ def expand_queries(question: str) -> list[str]:
     if not cleaned:
         return []
     return [
-        cleaned,
-        f"{cleaned} implementation function code",
+        cleaned, #non sono convinto dell'utilità di expand queries. dovrei testare.
+       #f"{cleaned} implementation function code",
     ]
