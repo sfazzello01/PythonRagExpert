@@ -1,0 +1,29 @@
+{
+  "benchmark_timestamp": "20260905T152632",
+  "config": {
+    "esperto_url": "http://localhost:5000",
+    "use_planner": true,
+    "use_reasoning": false,
+    "timeout_seconds": 180
+  },
+  "static": {
+    "kind": "independent_estimate",
+    "files": 0,
+    "python_files": 0,
+    "bytes": 0,
+    "estimated_chunks": 0,
+    "python_classes": 0,
+    "python_functions": 0,
+    "ast_nodes": 0,
+    "ast_edges_estimate": 0,
+    "fastapi_routes": [],
+    "frontend_fetches": [],
+    "services": {},
+    "extensions": {},
+    "read_or_parse_errors": []
+  },
+  "runtime": {
+    "skipped": true,
+    "reason": "static_only"
+  }
+}

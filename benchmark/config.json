@@ -1,0 +1,32 @@
+{
+  "root": "..",
+  "esperto_url": "http://localhost:5000",
+  "target_paths": [
+    "backend",
+    "frontend"
+  ],
+  "supported_extensions": [
+    ".py",
+    ".yaml",
+    ".yml",
+    ".md",
+    ".txt",
+    ".html",
+    ".js",
+    ".css"
+  ],
+  "skip_dirs": [
+    "__pycache__",
+    ".git",
+    ".pytest_cache",
+    ".mypy_cache",
+    "logs"
+  ],
+  "use_planner": true,
+  "use_reasoning": false,
+  "request_timeout_seconds": 180,
+  "chunk_size": 1200,
+  "chunk_overlap": 150,
+  "max_output_chars": 20000,
+  "max_error_chars": 1000
+}
