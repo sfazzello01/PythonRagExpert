@@ -10,7 +10,7 @@ from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from ..shared.settings import BASE_DIR
+from ..shared.settings import BASE_DIR, INDEX_CHUNK_OVERLAP, INDEX_CHUNK_SIZE
 from .discovery import service_for_path
 
 logger = logging.getLogger("EspertoChunking")
@@ -27,7 +27,10 @@ def fallback_text_split(path: Path, text: str) -> list[Document]:
     """Chunk a non-Python file while preserving its source metadata."""
     relative_path = _relative_path(path)
     service = service_for_path(path)
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150).split_text(text)
+    chunks = RecursiveCharacterTextSplitter(
+        chunk_size=INDEX_CHUNK_SIZE,
+        chunk_overlap=INDEX_CHUNK_OVERLAP,
+    ).split_text(text)
     return [
         Document(
             page_content=(

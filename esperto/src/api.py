@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field
 
 from .rag import stream_expert_response
 from config import (
-    QDRANT_HOST,
     QDRANT_COLLECTION,
     MAX_MESSAGE_LENGTH,
     MIN_MESSAGE_LENGTH,
@@ -24,7 +23,12 @@ app = FastAPI()
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=3, max_length=5000, description="User question to the expert")
+    message: str = Field(
+        ...,
+        min_length=MIN_MESSAGE_LENGTH,
+        max_length=MAX_MESSAGE_LENGTH,
+        description="User question to the expert",
+    )
     use_planner: bool = Field(default=True, description="Use the LLM retrieval planner")
     use_reasoning: bool = Field(default=False, description="Stream the model reasoning before the answer")
 
@@ -78,14 +82,12 @@ async def ask_expert(request: ChatRequest) -> StreamingResponse:
     Returns:
         StreamingResponse: La risposta dell'esperto in streaming, chunk per chunk.
     """
-    # Validate message length
+    # Il controllo pydantic sui limiti di lunghezza avviene prima dello strip:
+    # qui resta solo il caso di un messaggio di soli spazi.
     message = request.message.strip()
-    if len(message) < MIN_MESSAGE_LENGTH or len(message) > MAX_MESSAGE_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Message length must be between {MIN_MESSAGE_LENGTH} and {MAX_MESSAGE_LENGTH} characters"
-        )
-    
+    if not message:
+        raise HTTPException(status_code=400, detail="Il messaggio non puo' essere vuoto.")
+
     logger.info(f"Query received: {len(message)} chars")
     
     async def timeout_wrapper():

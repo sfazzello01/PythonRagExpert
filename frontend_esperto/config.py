@@ -9,6 +9,7 @@ FRONTEND_ROOT = Path(".")
 # Internal paths (relative to frontend)
 FRONTEND_SRC_DIR = FRONTEND_ROOT / "src"
 FRONTEND_TEMPLATES_DIR = FRONTEND_SRC_DIR / "templates"
+FRONTEND_STATIC_DIR = FRONTEND_SRC_DIR / "static"
 LOGS_DIR = FRONTEND_ROOT / "logs"
 LOGS_FILE = LOGS_DIR / "frontend_esperto.log"
 

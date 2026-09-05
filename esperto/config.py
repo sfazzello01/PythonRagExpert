@@ -84,8 +84,6 @@ def _load_config_from_env() -> AppConfig:
 # Load and validate config
 config = _load_config_from_env()
 
-# Expose simplified interface for backward compatibility
-EMBEDDING_MODEL = None  # Removed: actually using BGE-M3 from FlagEmbedding
 OLLAMA_URL = config.ollama_url
 LLM_MODEL = config.llm_model
 TEMPERATURE = config.temperature
@@ -113,9 +111,3 @@ INDEX_COMPLETE_FILE = INDEX_STATE_DIR / "index_complete"
 SUPPORTED_EXTENSIONS = frozenset(_env_csv("SUPPORTED_EXTENSIONS"))
 SKIP_DIRS = frozenset(_env_csv("SKIP_DIRS"))
 INDEX_TARGET_PATHS = _env_csv("INDEX_TARGET_PATHS")
-PYTHON_AST_MAX_CHARS = 1500
-
-# Chunk size ridotto per evitare l'offloading in CPU e velocizzare la KV Cache
-INDEX_CHUNK_SIZE = 1000  
-INDEX_CHUNK_OVERLAP = 200  
-INDEX_MAX_FILE_CHARS = 200_000

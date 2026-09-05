@@ -6,8 +6,6 @@ import json
 import os
 from pathlib import Path
 
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 from langchain_ollama import ChatOllama  # type: ignore
 
 from config import LLM_MODEL, OLLAMA_URL, TEMPERATURE
@@ -16,7 +14,17 @@ from .prompts import build_prompt
 from .planner import plan_subquestions
 from .retrieval import HybridRetriever
 
-_retriever = HybridRetriever()
+_retriever: HybridRetriever | None = None
+
+
+def _get_retriever() -> HybridRetriever:
+    """Lazy singleton: evita side-effect (client Qdrant) a import-time."""
+    global _retriever
+    if _retriever is None:
+        _retriever = HybridRetriever()
+    return _retriever
+
+
 def _create_response_llm(use_reasoning: bool) -> ChatOllama:
     """Create a response model configured for the current user request."""
     return ChatOllama(
@@ -27,15 +35,12 @@ def _create_response_llm(use_reasoning: bool) -> ChatOllama:
     )
 
 
-_llm = _create_response_llm(False)
 _planner_llm = ChatOllama(
     model=LLM_MODEL,
     base_url=OLLAMA_URL,
-    temperature=TEMPERATURE,
-    format="json",
+    temperature=0.0,  # output deterministico per il planner
     reasoning=False,
 )
-_generation_chain = build_prompt() | _llm | StrOutputParser()
 
 
 def _save_last_prompt(prompt_value) -> None:
@@ -60,19 +65,6 @@ def _save_last_prompt(prompt_value) -> None:
     temporary_path.replace(destination)
 
 
-def build_rag_chain():
-    """Compose retrieval, prompt construction, Ollama generation, and string streaming."""
-    return (
-        {"context": _retriever.retrieve_context, "question": RunnablePassthrough()}
-        | build_prompt()
-        | _llm
-        | StrOutputParser()
-    )
-
-
-rag_chain = build_rag_chain()
-
-
 async def stream_expert_response(
     question: str,
     use_planner: bool = True,
@@ -84,7 +76,7 @@ async def stream_expert_response(
         if use_planner
         else [question]
     )
-    context, sources = await _retriever.retrieve_many_with_sources(subquestions, question)
+    context, sources = await _get_retriever().retrieve_many_with_sources(subquestions, question)
     yield json.dumps(
         {"type": "sources", "data": {"sources": sources, "subquestions": subquestions}},
         ensure_ascii=False,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Iterable
+from typing import Callable, Iterable, TypeVar
 
 from langchain_core.documents import Document
 from qdrant_client import AsyncQdrantClient  # type: ignore
@@ -27,13 +27,18 @@ from .query import expand_queries
 
 
 def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
-    """Deduplicate equal chunks while retaining their best ColBERT score."""
-    by_content: dict[str, Document] = {}
+    """Deduplicate equal chunks while retaining their best ColBERT score.
+
+    La chiave e' il chunk_id (stabile per simbolo/posizione); due chunk con lo
+    stesso testo in file diversi restano distinti.
+    """
+    by_id: dict[str, Document] = {}
     for document in documents:
-        previous = by_content.get(document.page_content)
+        key = document.metadata.get("chunk_id") or document.page_content
+        previous = by_id.get(key)
         if previous is None or document.metadata["_colbert_score"] > previous.metadata["_colbert_score"]:
-            by_content[document.page_content] = document
-    return list(by_content.values())
+            by_id[key] = document
+    return list(by_id.values())
 
 
 def _document_sort_key(document: Document) -> tuple[int, float]:
@@ -43,19 +48,30 @@ def _document_sort_key(document: Document) -> tuple[int, float]:
     )
 
 
-def _limit_context_documents(documents: Iterable[Document]) -> list[Document]:
-    """Keep the most direct evidence within a stable source and character budget."""
-    selected: list[Document] = []
+T = TypeVar("T")
+
+
+def _apply_context_budget(items: Iterable[T], size_of: Callable[[T], int]) -> list[T]:
+    """Keep items within the shared source-count and character budgets."""
+    selected: list[T] = []
     total_characters = 0
-    for document in sorted(documents, key=_document_sort_key):
+    for item in items:
         if len(selected) >= RAG_CONTEXT_MAX_SOURCES:
             break
-        document_size = len(document.page_content)
-        if selected and total_characters + document_size > RAG_CONTEXT_MAX_CHARS:
+        item_size = size_of(item)
+        if selected and total_characters + item_size > RAG_CONTEXT_MAX_CHARS:
             continue
-        selected.append(document)
-        total_characters += document_size
+        selected.append(item)
+        total_characters += item_size
     return selected
+
+
+def _limit_context_documents(documents: Iterable[Document]) -> list[Document]:
+    """Keep the most direct evidence within a stable source and character budget."""
+    return _apply_context_budget(
+        sorted(documents, key=_document_sort_key),
+        lambda document: len(document.page_content),
+    )
 
 
 class HybridRetriever:
@@ -216,15 +232,5 @@ class HybridRetriever:
             )
         for source in sources:
             source["final_score"] = rerank_scores.get(source.get("chunk_id"))
-        selected_sources: list[dict] = []
-        total_characters = 0
-        for source in sources:
-            if len(selected_sources) >= RAG_CONTEXT_MAX_SOURCES:
-                break
-            source_size = len(source["content"])
-            if selected_sources and total_characters + source_size > RAG_CONTEXT_MAX_CHARS:
-                continue
-            selected_sources.append(source)
-            total_characters += source_size
-        sources = selected_sources
+        sources = _apply_context_budget(sources, lambda source: len(source["content"]))
         return "\n\n---\n\n".join(source["content"] for source in sources), sources

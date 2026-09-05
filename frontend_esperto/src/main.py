@@ -16,7 +16,12 @@ from fastapi.templating import Jinja2Templates  # type: ignore
 
 from .logcon import get_logger
 
-from config import ESPERTO_URL, ESPERTO_INDEXER_URL, FRONTEND_TEMPLATES_DIR, LOGS_FILE
+from config import (
+    ESPERTO_INDEXER_URL,
+    ESPERTO_URL,
+    FRONTEND_STATIC_DIR,
+    FRONTEND_TEMPLATES_DIR,
+)
 
 from .classi import ChatFrontendRequest
 
@@ -24,19 +29,9 @@ app = FastAPI(title="Frontend Esperto")
 
 template = Jinja2Templates(directory=str(FRONTEND_TEMPLATES_DIR))
 
-app.mount("/static", StaticFiles(directory=str("src/static")), name="static")
+app.mount("/static", StaticFiles(directory=str(FRONTEND_STATIC_DIR)), name="static")
 
 logger = get_logger(__name__)
-
-
-def _tail_frontend_log(lines: int) -> str:
-    """Restituisce le ultime righe del log frontend."""
-    max_lines = min(max(lines, 1), 2000)
-    if not LOGS_FILE.exists():
-        return ""
-
-    with LOGS_FILE.open("r", encoding="utf-8", errors="replace") as log_file:
-        return "".join(log_file.readlines()[-max_lines:])
 
 
 def fetch_esperto_status() -> dict[str, Any]:
@@ -86,8 +81,12 @@ def api_status():
 
 
 @app.post("/api/index/upload")
-async def upload_index(file: UploadFile = File(...)):
-    """Inoltra lo ZIP caricato dall'utente all'indexer dell'esperto."""
+def upload_index(file: UploadFile = File(...)):
+    """Inoltra lo ZIP caricato dall'utente all'indexer dell'esperto.
+
+    Endpoint sincrono: FastAPI lo esegue nel threadpool, cosi' la chiamata
+    bloccante a requests non ferma l'event loop durante l'upload.
+    """
     filename = file.filename or ""
     if not filename.lower().endswith(".zip"):
         return JSONResponse(
@@ -95,7 +94,7 @@ async def upload_index(file: UploadFile = File(...)):
             content={"error": "Il file deve essere un archivio .zip"},
         )
 
-    content = await file.read()
+    content = file.file.read()
     try:
         url = f"{str(ESPERTO_INDEXER_URL).rstrip('/')}/upload"
         response = requests.post(
@@ -103,27 +102,6 @@ async def upload_index(file: UploadFile = File(...)):
             files={"file": (filename, content, "application/zip")},
             timeout=(10, 120),
         )
-    except Exception as e:
-        logger.error(f"Errore di connessione all'indexer: {e}")
-        return JSONResponse(
-            status_code=502,
-            content={"error": f"Errore di connessione all'indexer: {e}"},
-        )
-
-    try:
-        body = response.json()
-    except ValueError:
-        body = {"detail": response.text}
-
-    return JSONResponse(status_code=response.status_code, content=body)
-
-
-@app.get("/api/index/status")
-def index_status():
-    """Proxy dello stato di indicizzazione dall'indexer."""
-    try:
-        url = f"{str(ESPERTO_INDEXER_URL).rstrip('/')}/status"
-        response = requests.get(url, timeout=10)
     except Exception as e:
         logger.error(f"Errore di connessione all'indexer: {e}")
         return JSONResponse(
@@ -205,15 +183,3 @@ def ask_esperto(request: ChatFrontendRequest):
         stream_response(),
         media_type="text/plain; charset=utf-8",
     )
-
-
-@app.get("/logs/frontend")
-def frontend_logs(lines: int = 200):
-    try:
-        return JSONResponse(content={"log_text": _tail_frontend_log(lines)})
-    except Exception as e:
-        logger.error(f"Errore recupero log frontend: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Errore recupero log frontend", "log_text": ""},
-        )

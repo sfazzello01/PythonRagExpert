@@ -37,7 +37,7 @@ services:
 
   database:
     profiles: ["parser"]
-    image: mariadb:latest
+    image: mariadb:12.3.3
     container_name: database
     env_file:
       - .env
@@ -54,7 +54,7 @@ services:
 
   ollama:
     profiles: ["parser", "esperto"]
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.33.3
     container_name: ollama
     ports:
       - "11434:11434"
@@ -78,7 +78,7 @@ services:
 
   adminer:
     profiles: ["parser"]
-    image: adminer:latest
+    image: adminer:6.0.1
     container_name: adminer
     ports:
       - "8080:8080"
@@ -89,7 +89,7 @@ services:
 
   qdrant:
     profiles: ["esperto"]
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.19.1
     container_name: qdrant
     ports: ["6333:6333"]
     volumes:
@@ -117,7 +117,7 @@ services:
     volumes:
       - ./hf_cache:/root/.cache/huggingface
       - ./esperto_state:/app/state
-      - ./esperto_workspace:/app/workspace
+      - esperto_workspace:/app/workspace
       - ./esperto_debug:/app/debug
     env_file:
       - .env
@@ -153,7 +153,7 @@ services:
     volumes:
       - ./hf_cache:/root/.cache/huggingface
       - ./esperto_state:/app/state
-      - ./esperto_workspace:/app/workspace
+      - esperto_workspace:/app/workspace
     env_file:
       - .env
     environment:
@@ -183,7 +183,7 @@ services:
       - "8005:8005"
     depends_on:
       esperto:
-        condition: service_healthy
+        condition: service_started
       esperto_indexer:
         condition: service_healthy
     environment:
@@ -191,3 +191,6 @@ services:
       - PYTHONPATH=/app
       - ESPERTO_URL=http://esperto:5000
       - ESPERTO_INDEXER_URL=http://esperto_indexer:5001
+
+volumes:
+  esperto_workspace:

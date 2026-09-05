@@ -114,7 +114,8 @@ def ensure_hybrid_collection(client: QdrantClient, recreate: bool = False) -> No
 
 
 def _point_id(chunk_id: str) -> str:
-    return str(uuid.UUID(hex=chunk_id))
+    """UUID deterministico (name-based) per il chunk_id applicativo."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"esperto:{chunk_id}"))
 
 
 def upsert_encoded_documents(

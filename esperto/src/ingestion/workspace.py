@@ -51,6 +51,17 @@ def _load_job() -> dict | None:
         except Exception as e:
             logger.warning("Stato job non leggibile: %s", e)
             _current_job = None
+    # Un job rimasto in queued/indexing da un run precedente e' morto con il
+    # processo (il thread e' daemon): va marcato come errore, altrimenti ogni
+    # nuovo upload verrebbe rifiutato con 409 per sempre.
+    if _current_job is not None and _current_job.get("status") in (JOB_QUEUED, JOB_INDEXING):
+        _current_job = {
+            **_current_job,
+            "status": JOB_ERROR,
+            "finished_at": time.time(),
+            "error": "Job interrotto dal riavvio del servizio.",
+        }
+        _save_job(_current_job)
     return _current_job
 
 
