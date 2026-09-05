@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Codebase Expert{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body class="dark-theme">
+    <header class="site-header">
+        <a href="/" class="link-header-style">Codebase Expert</a>
+        <nav class="page-nav" aria-label="Navigazione principale">
+            <a href="/" class="{% if request.url.path == '/' %}is-active{% endif %}">Esperto</a>
+        </nav>
+        <div class="system-status" aria-label="Stato servizi">
+            <span>Esperto <strong class="{{ status.status | default('error') }}">{{ status.status | default('Non disponibile') }}</strong></span>
+        </div>
+    </header>
+
+    <main>{% block content %}{% endblock %}</main>
+    <div id="ui-notices" class="notices" aria-live="polite" aria-atomic="true"></div>
+    <dialog id="confirm-dialog" class="confirm-dialog">
+        <form method="dialog">
+            <h2 id="confirm-title">Conferma azione</h2>
+            <p id="confirm-message"></p>
+            <div class="dialog-actions">
+                <button value="cancel" class="btn-secondary">Annulla</button>
+                <button value="confirm" class="btn-primary">Conferma</button>
+            </div>
+        </form>
+    </dialog>
+    <script src="{{ url_for('static', path='ui.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
