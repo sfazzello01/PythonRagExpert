@@ -25,8 +25,3 @@ class ParseFrontendRequest(BaseModel):
     url: str
     local: bool = False
     html_text: str | None = None
-
-class ChatFrontendRequest(BaseModel):
-    message: str
-    use_planner: bool = True
-    use_reasoning: bool = False

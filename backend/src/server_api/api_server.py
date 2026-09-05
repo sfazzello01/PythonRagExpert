@@ -42,7 +42,6 @@ from ..utilities.utilities import (
     full_gold_standard_from_db,
     gold_standard_urls_from_db,
     ollama_available,
-    esperto_available,
     run_judge,
 )
 from ..crawler import crawl_url, parse_html_text
@@ -845,7 +844,6 @@ def get_status() -> StatusResponce:
         "backend": "ok",
         "database": "ok" if db_available() else "error",
         "ollama": "ok" if ollama_available() else "error",
-        "esperto": "ok" if esperto_available() else "error",
     }
 
 

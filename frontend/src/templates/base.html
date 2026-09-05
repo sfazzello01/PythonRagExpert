@@ -14,13 +14,11 @@
             <a href="/parser" class="{% if request.url.path == '/parser' %}is-active{% endif %}">Parser</a>
             <a href="/gold" class="{% if request.url.path == '/gold' %}is-active{% endif %}">Gold Standard</a>
             <a href="/stats" class="{% if request.url.path == '/stats' %}is-active{% endif %}">Statistiche</a>
-            <a href="/esperto" class="{% if request.url.path == '/esperto' %}is-active{% endif %}">Esperto</a>
         </nav>
         <div class="system-status" aria-label="Stato servizi">
             <span>Backend <strong class="{{ status.backend | default('error') }}">{{ status.backend | default('Non disponibile') }}</strong></span>
             <span>DB <strong class="{{ status.database | default('error') }}">{{ status.database | default('Non disponibile') }}</strong></span>
             <span>Ollama <strong class="{{ status.ollama | default('error') }}">{{ status.ollama | default('Non disponibile') }}</strong></span>
-            <span>Esperto <strong class="{{ status.esperto | default('error') }}">{{ status.esperto | default('Non disponibile') }}</strong></span>
         </div>
     </header>
 

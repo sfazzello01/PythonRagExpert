@@ -16,14 +16,13 @@ from fastapi.templating import Jinja2Templates  # type: ignore
 
 from .logcon import get_logger
 
-from config import BACKEND_URL, ESPERTO_URL, FRONTEND_TEMPLATES_DIR, LOGS_FILE
+from config import BACKEND_URL, FRONTEND_TEMPLATES_DIR, LOGS_FILE
 
 from .classi import (
     ParseFrontendRequest,
     EvaluateFrontendRequest,
     AddWebResourceFrontendRequest,
     AddGoldStandardFrontendRequest,
-    ChatFrontendRequest,
     UrlFrontendRequest,
 )
 
@@ -197,14 +196,12 @@ def fetch_status() -> dict[str, str]:
             "backend": "error",
             "database": "error",
             "ollama": "error",
-            "esperto": "error",
         }
 
     return {
         "backend": str(data.get("backend", "error")),
         "database": str(data.get("database", "error")),
         "ollama": str(data.get("ollama", "error")),
-        "esperto": str(data.get("esperto", "error")),
     }
 
 
@@ -278,82 +275,6 @@ def view_global_stats(request: Request, domain: str | None = None):
 
     return render_page(request, "stats.html", domains=domini_disponibili)
 
-@app.get("/esperto", response_class=HTMLResponse)
-def view_esperto(request: Request):
-    return render_page(
-        request,
-        "esperto.html",
-    )
-
-
-@app.post("/ask")
-def ask_esperto(request: ChatFrontendRequest):
-    """
-    Proxy streaming verso il servizio esperto.
-
-    Il browser chiama il frontend, mentre il container frontend raggiunge
-    l'esperto tramite la rete interna Docker.
-    """
-    message = request.message.strip()
-
-    if not message:
-        return PlainTextResponse(
-            "Inserisci una domanda prima di inviare.",
-            status_code=400,
-        )
-
-    try:
-        esperto_url = str(ESPERTO_URL).rstrip("/")
-        full_url = f"{esperto_url}/ask"
-        response = requests.post(
-            full_url,
-            json={
-                "message": message,
-                "use_planner": request.use_planner,
-                "use_reasoning": request.use_reasoning,
-            },
-            timeout=(10, 300),
-            stream=True,
-        )
-    except Exception as e:
-        logger.error(f"Errore di connessione all'esperto: {e}")
-        return PlainTextResponse(
-            f"Errore di connessione all'esperto: {e}",
-            status_code=502,
-        )
-
-    if not response.ok:
-        error_text = response.text
-        response.close()
-        return PlainTextResponse(
-            f"Errore esperto: {response.status_code} - {error_text}",
-            status_code=502,
-        )
-
-    def stream_response():
-        try:
-            try:
-                for chunk in response.iter_content(
-                    chunk_size=None,
-                    decode_unicode=True,
-                ):
-                    if chunk:
-                        yield chunk
-            except ChunkedEncodingError as e:
-                logger.error(f"Stream esperto interrotto: {e}")
-                yield (
-                    "\n\nErrore: lo stream dell'esperto si e' interrotto prima "
-                    "di completare la risposta."
-                )
-        finally:
-            response.close()
-
-    return StreamingResponse(
-        stream_response(),
-        media_type="text/plain; charset=utf-8",
-    )
-
-
 @app.get("/logs/backend")
 def frontend_backend_logs(lines: int = 200):
     data, error = _backend_request(
@@ -391,7 +312,6 @@ def api_status():
                 "backend": "error",
                 "database": "error",
                 "ollama": "error",
-                "esperto": "error",
             },
         )
 

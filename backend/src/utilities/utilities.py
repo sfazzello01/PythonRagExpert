@@ -877,30 +877,6 @@ def ollama_available() -> bool:
         return False
 
 
-def esperto_available() -> bool:
-    """
-    Verifica se il servizio Esperto è raggiungibile e l'indicizzazione è completata.
-
-    Returns:
-        True se Esperto risponde correttamente e l'indicizzazione è completata, altrimenti False (bool).
-    """
-    try:
-        risposta = requests.get("http://esperto:5000/health", timeout=5)
-        logger.info(f"Esperto health check status: {risposta.status_code}")
-        if risposta.status_code == 200:
-            data = risposta.json()
-            logger.info(f"Esperto health response: {data}")
-            return data.get("status") == "ok"
-        logger.warning(f"Esperto health check failed with status: {risposta.status_code}")
-        return False
-    except requests.RequestException as e:
-        logger.warning(f"Esperto non è raggiungibile: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Errore imprevisto in esperto_available: {e}")
-        return False
-
-
 async def run_judge(
     parsed_text: str, gold_text: str, url: str = "N/A"
 ) -> dict[str, Any]:
