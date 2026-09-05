@@ -14,7 +14,7 @@ _PLANNER_PROMPT = """Sei un planner per il retrieval di una codebase.
 Genera sotto-domande solo se migliorano chiaramente il retrieval.
 Non introdurre ipotesi, nomi di file, simboli o tecnologie non presenti nella domanda.
 Ogni sotto-domanda deve essere rispondibile cercando nella codebase.
-Preferisci una o due sotto-domande; usa quattro solo per richieste realmente multi-parte.
+Genera da due a quattro sotto-domande a seconda della complessità della domanda originale.
 Mantieni una sola domanda se e gia specifica. Non rispondere alla domanda.
 Restituisci esclusivamente JSON valido: {{"subquestions":["..."]}}.
 

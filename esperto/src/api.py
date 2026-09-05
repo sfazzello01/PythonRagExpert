@@ -44,8 +44,8 @@ def health_check():
         # Verifica se il file flag esiste (indicizzazione completata)
         if not flag_file.exists():
             return {
-                "status": "indexing",
-                "message": "Indicizzazione in corso"
+                "status": "not_indexed",
+                "message": "Indice non presente: caricare uno ZIP tramite il servizio di ingestion"
             }
         
         # Verifica anche che Qdrant sia accessibile e abbia dati
