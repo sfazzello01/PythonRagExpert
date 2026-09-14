@@ -585,7 +585,7 @@ Il punteggio restituito viene salvato in:
 "_colbert_score": point.score
 ```
 
-`_query_colbert()` elimina immediatamente i punti con score inferiore a `SEMANTIC_RELEVANCE_THRESHOLD`.
+`_query_colbert()` calcola lo score del risultato migliore e imposta la soglia relativa a `top_score * SEMANTIC_RELEVANCE_RATIO`. Vengono mantenuti i punti con score maggiore o uguale a questa soglia.
 
 Il flusso locale è quindi:
 
@@ -1097,7 +1097,7 @@ QDRANT_PORT                porta Qdrant
 QDRANT_COLLECTION          collection usata
 K                          limite risultati primari
 PREFETCH_LIMIT             candidati per dense e sparse
-SEMANTIC_RELEVANCE_THRESHOLD soglia ColBERT
+SEMANTIC_RELEVANCE_RATIO     rapporto k della soglia ColBERT rispetto al top score
 EMBEDDING_MAX_LENGTH       lunghezza massima BGE-M3
 QDRANT_QUERY_TIMEOUT       timeout query Qdrant
 LLM_INFERENCE_TIMEOUT      timeout risposta LLM

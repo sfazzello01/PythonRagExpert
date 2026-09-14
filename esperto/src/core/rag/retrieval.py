@@ -207,12 +207,19 @@ class HybridRetriever:
         }
         sources = list(sources_by_key.values())
         if rerank_scores:
+            sources = [
+                source
+                for source in sources
+                if source.get("chunk_id") in rerank_scores
+            ]
             sources.sort(
                 key=lambda source: -float(rerank_scores.get(source.get("chunk_id"), -1.0)),
             )
         else:
-            sources.sort(key=lambda source: -float(source.get("score") or 0.0))
+            sources = []
         for source in sources:
-            source["final_score"] = rerank_scores.get(source.get("chunk_id"))
+            final_score = rerank_scores[source["chunk_id"]]
+            source["score"] = final_score
+            source["final_score"] = final_score
         sources = _apply_context_budget(sources, lambda source: len(source["content"]))
         return "\n\n---\n\n".join(source["content"] for source in sources), sources

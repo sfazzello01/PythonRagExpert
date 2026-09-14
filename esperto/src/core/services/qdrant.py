@@ -30,7 +30,7 @@ from ..shared.settings import (
     QDRANT_HOST,
     QDRANT_PORT,
     QDRANT_QUERY_TIMEOUT,
-    SEMANTIC_RELEVANCE_THRESHOLD,
+    SEMANTIC_RELEVANCE_RATIO,
 )
 from ..shared.vectors import QueryVectors, lexical_weights_to_sparse_vector
 
@@ -165,6 +165,10 @@ async def _query_colbert(client: AsyncQdrantClient, **kwargs) -> list[Document]:
         logger.error("Qdrant query failed: %s: %s", type(error).__name__, error)
         return []
 
+    if not response.points:
+        return []
+
+    relevance_threshold = max(point.score for point in response.points) * SEMANTIC_RELEVANCE_RATIO
     return [
         Document(
             page_content=point.payload.get("page_content", ""),
@@ -174,7 +178,7 @@ async def _query_colbert(client: AsyncQdrantClient, **kwargs) -> list[Document]:
             },
         )
         for point in response.points
-        if point.score >= SEMANTIC_RELEVANCE_THRESHOLD
+        if point.score >= relevance_threshold
     ]
 
 
