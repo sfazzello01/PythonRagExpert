@@ -34,7 +34,10 @@ class AppConfig(BaseModel):
     index_state_dir: Path
     dense_model_name: str = "BAAI/bge-m3"
     symbol_graph_max_neighbors: int = Field(default=6, ge=1)
-    symbol_graph_max_depth: int = Field(default=2, ge=0)
+    symbol_graph_max_depth: int = Field(default=3, ge=0)
+    symbol_graph_pagerank_damping: float = Field(default=0.4, gt=0.0, lt=1.0)
+    symbol_graph_pagerank_iterations: int = Field(default=20, ge=1)
+    symbol_graph_pagerank_tolerance: float = Field(default=1e-6, gt=0.0)
     rag_context_max_chars: int = Field(default=60_000, ge=1)
     rag_context_max_sources: int = Field(default=35, ge=1)
     index_chunk_size: int = Field(default=1200, ge=1)
@@ -85,6 +88,9 @@ INDEX_STATE_DIR = config.index_state_dir
 DENSE_MODEL_NAME = config.dense_model_name
 SYMBOL_GRAPH_MAX_NEIGHBORS = config.symbol_graph_max_neighbors
 SYMBOL_GRAPH_MAX_DEPTH = config.symbol_graph_max_depth
+SYMBOL_GRAPH_PAGERANK_DAMPING = config.symbol_graph_pagerank_damping
+SYMBOL_GRAPH_PAGERANK_ITERATIONS = config.symbol_graph_pagerank_iterations
+SYMBOL_GRAPH_PAGERANK_TOLERANCE = config.symbol_graph_pagerank_tolerance
 RAG_CONTEXT_MAX_CHARS = config.rag_context_max_chars
 RAG_CONTEXT_MAX_SOURCES = config.rag_context_max_sources
 INDEX_CHUNK_SIZE = config.index_chunk_size

@@ -35,8 +35,8 @@ CLIENT
           |      +--> ColBERT reranking
           |      +--> deduplica
           |      +--> stesso-file expansion
-          |      +--> symbol graph expansion
-          |      +--> reranking globale
+          |      +--> symbol graph expansion (BFS 3 hop + PPR diretto)
+          |      +--> reranking globale ColBERT + filtro soglia relativa
           |      +--> context budget
           +--> invia sources
           +--> costruisce prompt grounding
@@ -666,22 +666,32 @@ self._symbol_graph.related_chunks(chunk_ids, limit=SYMBOL_GRAPH_MAX_NEIGHBORS)
 
 Implementazione runtime: [src/core/services/symbol_graph.py](esperto/src/core/services/symbol_graph.py).
 
-Il graph:
+Il graph opera in due fasi distinte:
 
-1. associa ogni chunk ai suoi simboli;
-2. parte dai simboli dei chunk recuperati;
-3. percorre gli edge `calls` e `inherits`;
-4. aggiunge anche la direzione inversa come `called_by:*`;
-5. evita simboli già visitati;
-6. percorre al massimo `SYMBOL_GRAPH_MAX_DEPTH` livelli;
-7. restituisce al massimo `SYMBOL_GRAPH_MAX_NEIGHBORS` chunk distinti;
-8. esclude i chunk già presenti nella query iniziale.
+1. **Raccolta dei candidati (BFS bidirezionale)**: parte dai simboli dei chunk
+   recuperati, percorre gli edge `calls` e `inherits` in entrambe le direzioni
+   (la direzione inversa è marcata `called_by:*`), evita i simboli già visitati
+   e si ferma entro `SYMBOL_GRAPH_MAX_DEPTH` livelli. I chunk seed sono esclusi
+   dai risultati. In questa fase non viene applicato alcun limite di 6.
+2. **Ranking (Personalized PageRank diretto)**: sul sotto-grafo raccolto viene
+   calcolato un PPR con personalizzazione uniforme sui seed. La propagazione
+   usa solo l'adiacenza diretta originale (`source -> target`); gli archi
+   sintetici `called_by:*` non entrano nella matrice di transizione. La dangling
+   mass è redistribuita ai seed; l'iterazione si ferma per convergenza L1 o al
+   massimo numero di iterazioni.
 
-I limiti attuali sono definiti in [src/core/shared/settings.py](esperto/src/core/shared/settings.py):
+I rank dei simboli sono poi aggregati per chunk top-level, ordinati per score
+decrescente con `chunk_id` come tie-breaker, e vengono restituiti al massimo
+`SYMBOL_GRAPH_MAX_NEIGHBORS` chunk distinti.
+
+I parametri attuali sono definiti in [src/core/shared/settings.py](esperto/src/core/shared/settings.py):
 
 ```text
-SYMBOL_GRAPH_MAX_DEPTH = 2
+SYMBOL_GRAPH_MAX_DEPTH = 3
 SYMBOL_GRAPH_MAX_NEIGHBORS = 6
+SYMBOL_GRAPH_PAGERANK_DAMPING = 0.4
+SYMBOL_GRAPH_PAGERANK_ITERATIONS = 20
+SYMBOL_GRAPH_PAGERANK_TOLERANCE = 1e-6
 ```
 
 I chunk graph vengono poi recuperati direttamente da Qdrant tramite `get_documents_by_chunk_ids()`. Questa operazione usa gli ID, non dense/sparse/ColBERT.
@@ -692,7 +702,7 @@ A questi documenti vengono aggiunti:
 _graph_relation = "..."
 ```
 
-Il valore della relazione può rappresentare un percorso come:
+Il valore della relazione è il percorso BFS più breve verso il simbolo, ad esempio:
 
 ```text
 calls->called_by:calls
@@ -842,21 +852,23 @@ Il risultato viene trasformato in:
 rerank_scores[chunk_id] = colbert_score
 ```
 
-### 8.5 Ordinamento finale
+### 8.5 Filtro e ordinamento finale
 
-Se esiste almeno uno score ColBERT globale, i sources vengono ordinati esclusivamente con:
+Se esiste almeno uno score ColBERT globale, i sources vengono prima filtrati ai
+soli candidati che superano la soglia relativa: chi non compare nel reranking
+(sotto soglia) viene eliminato dal contesto. I sopravvissuti vengono ordinati
+esclusivamente con:
 
 ```python
 -final_score
 ```
 
-Dove `final_score` è lo score ColBERT ricalcolato rispetto alla domanda originale.
+Dove `final_score` è lo score ColBERT ricalcolato rispetto alla domanda
+originale. Lo stesso valore è assegnato anche a `score`, così l'ordine
+e il valore visualizzato coincidono.
 
-Se il reranking globale non restituisce score, viene usato il fallback:
-
-```python
--score
-```
+Se il reranking globale non restituisce alcun candidato sopra soglia, il
+contesto resta vuoto: nessun chunk debole viene passato all'LLM.
 
 Infine viene applicato un unico budget condiviso di:
 
@@ -902,7 +914,8 @@ Avviene in `retrieve_many_with_sources()`:
 risultati domanda originale
 + risultati sotto-domande
 -> deduplica per (filename, chunk_id)
--> reranking rispetto alla domanda originale
+-> reranking ColBERT rispetto alla domanda originale
+-> eliminazione dei candidati sotto soglia relativa
 ```
 
 Non vengono sommati i punteggi delle sotto-domande.
@@ -911,19 +924,25 @@ Non vengono sommati i punteggi delle sotto-domande.
 
 Non è una fusion numerica.
 
-Il graph prende i chunk già recuperati e aggiunge chunk collegati:
+Il graph raccoglie i candidati con BFS bidirezionale fino a 3 hop e li ordina
+con Personalized PageRank diretto:
 
 ```text
-chunk recuperati
+chunk recuperati (seed)
       |
       v
-calls/inherits nel graph
+BFS bidirezionale su calls/inherits (max 3 hop)
       |
       v
-chunk correlati recuperati per ID
+PPR diretto (source -> target) sul sotto-grafo
+      |
+      v
+top 6 chunk correlati recuperati per ID
 ```
 
-Nel percorso `retrieve_many_with_sources()`, anche questi chunk vengono inclusi tra i candidati del reranking globale ColBERT, se sono presenti nei sources raccolti.
+I punteggi PPR selezionano solo quali chunk graph entrare nel pool: nel percorso
+`retrieve_many_with_sources()` anche questi chunk vengono sottoposti al
+reranking globale ColBERT come gli altri candidati.
 
 ### 9.5 Formula che non esiste nel codice
 
@@ -937,7 +956,8 @@ final_score =
   + delta * graph_score
 ```
 
-Non esiste un `graph_score` numerico. Il graph fornisce relazioni strutturali e nuovi candidati.
+Il `graph_score` esiste (punteggio PPR) ma serve solo a scegliere i candidati
+graph: non entra in una somma con gli altri score.
 
 ---
 
@@ -1115,7 +1135,10 @@ Costanti interne di retrieval in [src/core/shared/settings.py](esperto/src/core/
 DENSE_MODEL_NAME = BAAI/bge-m3
 DENSE_DIMENSION = 1024
 SYMBOL_GRAPH_MAX_NEIGHBORS = 6
-SYMBOL_GRAPH_MAX_DEPTH = 2
+SYMBOL_GRAPH_MAX_DEPTH = 3
+SYMBOL_GRAPH_PAGERANK_DAMPING = 0.4
+SYMBOL_GRAPH_PAGERANK_ITERATIONS = 20
+SYMBOL_GRAPH_PAGERANK_TOLERANCE = 1e-6
 RAG_CONTEXT_MAX_CHARS = 60_000
 RAG_CONTEXT_MAX_SOURCES = 35
 INDEX_CHUNK_SIZE = 1200
@@ -1157,7 +1180,7 @@ client
   -> Qdrant ColBERT reranking
   -> deduplicate chunks
   -> same-file expansion
-  -> symbol graph expansion
+  -> symbol graph expansion (BFS 3 hop + PPR)
   -> context budget
   -> sources event
   -> grounded prompt
@@ -1175,6 +1198,7 @@ client
   -> retrieval parallelo per domanda
   -> deduplica sources per (filename, chunk_id)
   -> reranking globale ColBERT sulla domanda originale
+  -> eliminazione dei candidati sotto la soglia relativa
   -> budget unico
   -> sources event
   -> grounded prompt
@@ -1187,8 +1211,10 @@ client
 Dense + Sparse = pool di candidati Qdrant
 ColBERT         = score semantico dei candidati
 Multi-query     = unione e deduplica dei chunk
-Symbol graph    = aggiunta di chunk strutturalmente correlati
-Final ranking   = principalmente ColBERT sulla domanda originale
+Symbol graph    = candidati via BFS 3-hop, selezione via PPR diretto
+Final ranking   = ColBERT sulla domanda originale, con filtro a soglia relativa
 ```
 
-La fusione attuale è quindi una pipeline di **candidate retrieval, reranking, deduplica ed espansione strutturale**, non una formula unica che somma dense, sparse, ColBERT e graph score.
+La fusione attuale è quindi una pipeline di **candidate retrieval, reranking,
+deduplica, filtro di rilevanza ed espansione strutturale**, non una formula
+unica che somma dense, sparse, ColBERT e graph score.
