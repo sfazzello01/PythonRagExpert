@@ -41,11 +41,8 @@ def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
     return list(by_id.values())
 
 
-def _document_sort_key(document: Document) -> tuple[int, float]:
-    return (
-        document.metadata.get("_context_priority", 0),
-        -document.metadata.get("_colbert_score", 0.0),
-    )
+def _document_sort_key(document: Document) -> float:
+    return -document.metadata.get("_colbert_score", 0.0)
 
 
 T = TypeVar("T")
@@ -98,10 +95,6 @@ class HybridRetriever:
         unique_documents = _keep_highest_scoring(
             document for results in initial_results for document in results
         )
-        primary_contents = {document.page_content for document in unique_documents}
-        for document in unique_documents:
-            document.metadata["_context_priority"] = 0
-
         final_documents: list[Document] = []
         processed_files: set[str] = set()
         for document in unique_documents:
@@ -126,10 +119,6 @@ class HybridRetriever:
                     ]
                 ),
             )
-            for same_file_document in same_file_documents:
-                same_file_document.metadata["_context_priority"] = (
-                    0 if same_file_document.page_content in primary_contents else 1
-                )
             final_documents.extend(same_file_documents or [document])
 
         ranked_documents = sorted(_keep_highest_scoring(final_documents), key=_document_sort_key)
@@ -149,7 +138,6 @@ class HybridRetriever:
             document.metadata["_graph_relation"] = graph_relations[
                 document.metadata["chunk_id"]
             ]
-            document.metadata["_context_priority"] = 2
         source_documents = list(ranked_documents)
         source_documents.extend(graph_documents)
         source_documents = _limit_context_documents(source_documents)
@@ -163,7 +151,6 @@ class HybridRetriever:
                 "end_line": document.metadata.get("end_line"),
                 "chunk_id": document.metadata.get("chunk_id"),
                 "score": document.metadata.get("_colbert_score"),
-                "_context_priority": document.metadata.get("_context_priority", 0),
                 "graph_relation": document.metadata.get("_graph_relation"),
                 "content": document.page_content,
             }
@@ -224,12 +211,7 @@ class HybridRetriever:
                 key=lambda source: -float(rerank_scores.get(source.get("chunk_id"), -1.0)),
             )
         else:
-            sources.sort(
-                key=lambda source: (
-                    source.get("_context_priority", 0),
-                    -float(source.get("score") or 0.0),
-                ),
-            )
+            sources.sort(key=lambda source: -float(source.get("score") or 0.0))
         for source in sources:
             source["final_score"] = rerank_scores.get(source.get("chunk_id"))
         sources = _apply_context_budget(sources, lambda source: len(source["content"]))

@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import json
-import tempfile
 import unittest
-from pathlib import Path
 
 from benchmark import runner
 
@@ -18,22 +15,63 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(50, len({item["id"] for item in queries}))
         self.assertTrue(all(item["area"] and item["question"] for item in queries))
 
-    def test_text_chunks(self) -> None:
-        self.assertEqual(0, runner.text_chunks(0, 1200, 150))
-        self.assertEqual(1, runner.text_chunks(100, 1200, 150))
-        self.assertEqual(1, runner.text_chunks(1200, 1200, 150))
-        self.assertEqual(2, runner.text_chunks(1201, 1200, 150))
-        self.assertEqual(2, runner.text_chunks(2250, 1200, 150))
-        self.assertEqual(3, runner.text_chunks(2251, 1200, 150))
+    def test_normalize_source_path_removes_historical_prefix(self) -> None:
+        self.assertEqual(
+            "backend/src/server_api/api_server.py",
+            runner.normalize_source_path("labnew/backend/src/server_api/api_server.py#api_parse"),
+        )
 
-    def test_inspect_python_single_pass(self) -> None:
-        source = """from fastapi import FastAPI\napp = FastAPI()\nclass Base: pass\nclass Child(Base):\n    def method(self): helper()\ndef helper(): return 1\n@app.get('/x')\ndef endpoint(): helper()\n"""
-        info = runner.inspect_python(Path("sample.py"), source, 1200, 150)
-        self.assertEqual(2, info["classes"])
-        self.assertEqual(3, info["functions"])
-        self.assertEqual(5, info["nodes"])
-        self.assertIn(("get", "/x"), info["routes"])
-        self.assertEqual(5, info["edges"])
+    def test_source_matches_filename_and_suffix(self) -> None:
+        self.assertTrue(
+            runner.source_matches(
+                "backend/src/server_api/api_server.py",
+                {"filename": "labnew/backend/src/server_api/api_server.py", "symbol": "parse"},
+            )
+        )
+        self.assertFalse(
+            runner.source_matches(
+                "backend/src/server_api/api_server.py",
+                {"filename": "labnew/frontend/src/main.py"},
+            )
+        )
+
+    def test_retrieval_metrics_deduplicate_and_use_ranking(self) -> None:
+        expected = ["backend/src/a.py", "backend/src/b.py"]
+        returned = [
+            {"filename": "labnew/backend/src/no.py"},
+            {"filename": "labnew/backend/src/a.py"},
+            {"filename": "labnew/backend/src/a.py"},
+            {"filename": "labnew/backend/src/b.py"},
+        ]
+        metrics = runner.retrieval_metrics(expected, returned)
+        self.assertEqual(0.6667, metrics["precision_at_5"])
+        self.assertEqual(1.0, metrics["recall_at_5"])
+        self.assertEqual(1, metrics["hit_at_5"])
+        self.assertEqual(0.5, metrics["mrr"])
+        self.assertEqual(3, metrics["unique_returned_sources"])
+
+    def test_retrieval_metrics_without_sources(self) -> None:
+        metrics = runner.retrieval_metrics(["backend/src/a.py"], [])
+        self.assertEqual(0.0, metrics["precision_at_5"])
+        self.assertEqual(0.0, metrics["recall_at_5"])
+        self.assertEqual(0, metrics["hit_at_5"])
+        self.assertEqual(0.0, metrics["mrr"])
+
+    def test_retrieval_metrics_without_expected_sources_is_not_evaluable(self) -> None:
+        metrics = runner.retrieval_metrics([], [{"filename": "backend/src/a.py"}])
+        self.assertIsNone(metrics["recall_at_5"])
+        self.assertEqual(0, metrics["hit_at_5"])
+
+    def test_aggregate_retrieval_by_area_and_median(self) -> None:
+        answers = [
+            {"area": "backend", "retrieval_metrics": {"precision_at_5": 1.0, "recall_at_5": 0.5, "hit_at_5": 1, "mrr": 1.0}},
+            {"area": "backend", "retrieval_metrics": {"precision_at_5": 0.0, "recall_at_5": 0.0, "hit_at_5": 0, "mrr": 0.0}},
+            {"area": "frontend", "retrieval_metrics": {"precision_at_5": 0.5, "recall_at_5": 1.0, "hit_at_5": 1, "mrr": 0.5}},
+        ]
+        metrics = runner.aggregate_retrieval(answers)
+        self.assertEqual(3, metrics["questions"])
+        self.assertEqual(0.5, metrics["median_precision_at_5"])
+        self.assertEqual(0.5, metrics["by_area"]["backend"]["avg_precision_at_5"])
 
     def test_parse_stream(self) -> None:
         payload = [
@@ -43,53 +81,18 @@ class RunnerTest(unittest.TestCase):
         ]
         response = (line.encode() + b"\n" for line in payload)
         config = runner.BenchmarkConfig(
-            root=runner.REPO_ROOT,
             url="http://example.test",
-            target_paths=(),
-            extensions=frozenset(),
-            skip_dirs=frozenset(),
             use_planner=True,
             use_reasoning=False,
             timeout=1,
-            chunk_size=1200,
-            chunk_overlap=150,
             output_limit=100,
             error_limit=100,
-            static_only=False,
         )
         answer, sources, reasoning, errors = runner.parse_stream(response, config)
         self.assertEqual("Ciao mondo", answer)
         self.assertEqual([{"filename": "a.py"}], sources)
         self.assertEqual([], reasoning)
         self.assertEqual([], errors)
-
-    def test_static_metrics_with_temp_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "backend").mkdir()
-            (root / "backend" / "api.py").write_text("from fastapi import FastAPI\napp=FastAPI()\n@app.get('/x')\ndef x(): return 1\n", encoding="utf-8")
-            (root / "frontend").mkdir()
-            (root / "frontend" / "page.html").write_text("<script>fetch('/api/x')</script>", encoding="utf-8")
-            config = runner.BenchmarkConfig(
-                root=root,
-                url="http://example.test",
-                target_paths=("backend", "frontend"),
-                extensions=frozenset({".py", ".html"}),
-                skip_dirs=frozenset({"__pycache__"}),
-                use_planner=True,
-                use_reasoning=False,
-                timeout=1,
-                chunk_size=1200,
-                chunk_overlap=150,
-                output_limit=100,
-                error_limit=100,
-                static_only=False,
-            )
-            metrics = runner.static_metrics(config)
-        self.assertEqual(2, metrics["files"])
-        self.assertEqual(1, metrics["python_files"])
-        self.assertEqual(1, metrics["fastapi_routes"][0]["path"] and len(metrics["fastapi_routes"]))
-        self.assertEqual("/api/x", metrics["frontend_fetches"][0]["url"])
 
     def test_runtime_metrics_partial_and_failed(self) -> None:
         answers = [
