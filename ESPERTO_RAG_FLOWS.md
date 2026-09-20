@@ -944,22 +944,6 @@ I punteggi PPR selezionano solo quali chunk graph entrare nel pool: nel percorso
 `retrieve_many_with_sources()` anche questi chunk vengono sottoposti al
 reranking globale ColBERT come gli altri candidati.
 
-### 9.5 Formula che non esiste nel codice
-
-Il sistema attuale non implementa una formula come:
-
-```text
-final_score =
-    alpha * dense_score
-  + beta * sparse_score
-  + gamma * colbert_score
-  + delta * graph_score
-```
-
-Il `graph_score` esiste (punteggio PPR) ma serve solo a scegliere i candidati
-graph: non entra in una somma con gli altri score.
-
----
 
 ## 10. Prompt grounding e generazione
 
