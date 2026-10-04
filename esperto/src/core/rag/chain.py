@@ -13,6 +13,7 @@ from config import LLM_MODEL, OLLAMA_URL, TEMPERATURE
 from .prompts import build_prompt
 from .planner import plan_subquestions
 from .retrieval import HybridRetriever
+from ..shared.options import RetrievalOptions
 
 _retriever: HybridRetriever | None = None
 
@@ -65,18 +66,31 @@ def _save_last_prompt(prompt_value) -> None:
     temporary_path.replace(destination)
 
 
-async def stream_expert_response(
+async def retrieve_only(
     question: str,
     use_planner: bool = True,
-    use_reasoning: bool = False,
-):
-    """Yield sources metadata then generated answer chunks for the API streaming response."""
+    options: RetrievalOptions = RetrievalOptions(),
+) -> tuple[str, list[str], list[dict]]:
+    """Run planner + retrieval without generation; returns (context, subquestions, sources)."""
     subquestions = (
         await plan_subquestions(question, _planner_llm)
         if use_planner
         else [question]
     )
-    context, sources = await _get_retriever().retrieve_many_with_sources(subquestions, question)
+    context, sources = await _get_retriever().retrieve_many_with_sources(
+        subquestions, question, options
+    )
+    return context, subquestions, sources
+
+
+async def stream_expert_response(
+    question: str,
+    use_planner: bool = True,
+    use_reasoning: bool = False,
+    options: RetrievalOptions = RetrievalOptions(),
+):
+    """Yield sources metadata then generated answer chunks for the API streaming response."""
+    context, subquestions, sources = await retrieve_only(question, use_planner, options)
     yield json.dumps(
         {"type": "sources", "data": {"sources": sources, "subquestions": subquestions}},
         ensure_ascii=False,

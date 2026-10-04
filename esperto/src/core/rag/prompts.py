@@ -22,6 +22,7 @@ INSTRUCTION = (
     "4. Se proponi modifiche o refactoring, mostra chiaramente il codice \"Prima\" "
     "(quello del contesto) e il codice \"Dopo\" proposto.\n"
     "5. Cita sempre il nome del file e, se presente, la linea o la funzione a cui ti riferisci.\n\n"
+    "6. Traduci correttamente i vocaboli tecnici.\n"
     "NON GENERARE:\n"
     "- Parafrasi ripetitive della stessa informazione\n"
     "- Elaborazioni prolungate dello stesso concetto\n"

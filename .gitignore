@@ -231,3 +231,6 @@ hf_cache/
 
 # Esperto persistent index state
 esperto_state/
+
+# Benchmark output
+benchmark_results/

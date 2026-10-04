@@ -129,5 +129,28 @@ services:
       - ESPERTO_URL=http://esperto:5000
       - ESPERTO_INDEXER_URL=http://esperto_indexer:5001
 
+  benchmark:
+    profiles: ["benchmark"]
+    build:
+      context: ./benchmark
+      dockerfile: dockerfile
+    container_name: benchmark
+    ports:
+      - "5002:5002"
+    depends_on:
+      esperto:
+        condition: service_healthy
+      esperto_indexer:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - ESPERTO_URL=http://esperto:5000
+      - ESPERTO_INDEXER_URL=http://esperto_indexer:5001
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./benchmark/datasets:/app/datasets
+      - ./benchmark_results:/app/results
+
 volumes:
   esperto_workspace:

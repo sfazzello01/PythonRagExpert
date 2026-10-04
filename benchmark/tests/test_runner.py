@@ -1,113 +1,101 @@
-"""Test isolati del benchmark esterno."""
-
-from __future__ import annotations
-
 import json
-import unittest
+from pathlib import Path
 
-from benchmark import runner
+import pytest
 
+from src import judge, ollama, runner
+from src.runner import RunSpec, check_spec, execute_run
 
-class RunnerTest(unittest.TestCase):
-    def test_queries_schema_and_count(self) -> None:
-        queries = runner.load_queries(runner.ROOT / "queries.json")
-        self.assertEqual(50, len(queries))
-        self.assertEqual(50, len({item["id"] for item in queries}))
-        self.assertTrue(all(item["area"] and item["question"] for item in queries))
-
-    def test_normalize_source_path_removes_historical_prefix(self) -> None:
-        self.assertEqual(
-            "backend/src/server_api/api_server.py",
-            runner.normalize_source_path("labnew/backend/src/server_api/api_server.py#api_parse"),
-        )
-
-    def test_source_matches_filename_and_suffix(self) -> None:
-        self.assertTrue(
-            runner.source_matches(
-                "backend/src/server_api/api_server.py",
-                {"filename": "labnew/backend/src/server_api/api_server.py", "symbol": "parse"},
-            )
-        )
-        self.assertFalse(
-            runner.source_matches(
-                "backend/src/server_api/api_server.py",
-                {"filename": "labnew/frontend/src/main.py"},
-            )
-        )
-
-    def test_retrieval_metrics_deduplicate_and_use_ranking(self) -> None:
-        expected = ["backend/src/a.py", "backend/src/b.py"]
-        returned = [
-            {"filename": "labnew/backend/src/no.py"},
-            {"filename": "labnew/backend/src/a.py"},
-            {"filename": "labnew/backend/src/a.py"},
-            {"filename": "labnew/backend/src/b.py"},
-        ]
-        metrics = runner.retrieval_metrics(expected, returned)
-        self.assertEqual(0.6667, metrics["precision_at_5"])
-        self.assertEqual(1.0, metrics["recall_at_5"])
-        self.assertEqual(1, metrics["hit_at_5"])
-        self.assertEqual(0.5, metrics["mrr"])
-        self.assertEqual(3, metrics["unique_returned_sources"])
-
-    def test_retrieval_metrics_without_sources(self) -> None:
-        metrics = runner.retrieval_metrics(["backend/src/a.py"], [])
-        self.assertEqual(0.0, metrics["precision_at_5"])
-        self.assertEqual(0.0, metrics["recall_at_5"])
-        self.assertEqual(0, metrics["hit_at_5"])
-        self.assertEqual(0.0, metrics["mrr"])
-
-    def test_retrieval_metrics_without_expected_sources_is_not_evaluable(self) -> None:
-        metrics = runner.retrieval_metrics([], [{"filename": "backend/src/a.py"}])
-        self.assertIsNone(metrics["recall_at_5"])
-        self.assertEqual(0, metrics["hit_at_5"])
-
-    def test_aggregate_retrieval_by_area_and_median(self) -> None:
-        answers = [
-            {"area": "backend", "retrieval_metrics": {"precision_at_5": 1.0, "recall_at_5": 0.5, "hit_at_5": 1, "mrr": 1.0}},
-            {"area": "backend", "retrieval_metrics": {"precision_at_5": 0.0, "recall_at_5": 0.0, "hit_at_5": 0, "mrr": 0.0}},
-            {"area": "frontend", "retrieval_metrics": {"precision_at_5": 0.5, "recall_at_5": 1.0, "hit_at_5": 1, "mrr": 0.5}},
-        ]
-        metrics = runner.aggregate_retrieval(answers)
-        self.assertEqual(3, metrics["questions"])
-        self.assertEqual(0.5, metrics["median_precision_at_5"])
-        self.assertEqual(0.5, metrics["by_area"]["backend"]["avg_precision_at_5"])
-
-    def test_parse_stream(self) -> None:
-        payload = [
-            json.dumps({"type": "sources", "data": {"sources": [{"filename": "a.py"}]}}),
-            json.dumps({"type": "answer", "data": "Ciao"}),
-            json.dumps({"type": "answer", "data": " mondo"}),
-        ]
-        response = (line.encode() + b"\n" for line in payload)
-        config = runner.BenchmarkConfig(
-            url="http://example.test",
-            use_planner=True,
-            use_reasoning=False,
-            timeout=1,
-            output_limit=100,
-            error_limit=100,
-        )
-        answer, sources, reasoning, errors = runner.parse_stream(response, config)
-        self.assertEqual("Ciao mondo", answer)
-        self.assertEqual([{"filename": "a.py"}], sources)
-        self.assertEqual([], reasoning)
-        self.assertEqual([], errors)
-
-    def test_runtime_metrics_partial_and_failed(self) -> None:
-        answers = [
-            {"area": "a", "status": "ok", "latency_seconds": 1.0, "sources_count": 2},
-            {"area": "a", "status": "partial", "latency_seconds": 3.0, "sources_count": 0},
-            {"area": "b", "status": "failed", "latency_seconds": 0.5, "sources_count": 0},
-        ]
-        metrics = runner.runtime_metrics(answers)
-        self.assertEqual(3, metrics["questions"])
-        self.assertEqual(1, metrics["completed"])
-        self.assertEqual(1, metrics["partial"])
-        self.assertEqual(1, metrics["failed"])
-        self.assertAlmostEqual(1.5, metrics["avg_latency_seconds"])
-        self.assertEqual(1, metrics["answers_with_sources"])
+SOURCES = [
+    {
+        "filename": "src/requests/utils.py", "symbol_name": "default_user_agent", "chunk_type": "function",
+        "start_line": 1, "end_line": 5, "chunk_id": "c1", "score": 0.9, "graph_relation": None,
+        "content": "def default_user_agent(): ...",
+    },
+    {
+        "filename": "src/requests/api.py", "symbol_name": "get", "chunk_type": "function",
+        "start_line": 1, "end_line": 5, "chunk_id": "c2", "score": 0.5, "graph_relation": None,
+        "content": "def get(): ...",
+    },
+]
 
 
-if __name__ == "__main__":
-    unittest.main()
+class FakeClient:
+    def index_zip(self, content, filename):
+        return {"indexing_seconds": 1.5}
+
+    def health(self):
+        return {"points_count": 42}
+
+    def retrieve(self, question, use_planner, options):
+        return {"subquestions": [question], "sources": SOURCES, "seconds": 0.1}
+
+    def ask(self, question, use_planner, options):
+        return {
+            "subquestions": [question], "sources": SOURCES, "answer": "Vedi src/requests/utils.py e fake.py",
+            "retrieval_s": 0.1, "ttft_s": 0.2, "total_s": 0.5, "error": None,
+        }
+
+
+@pytest.fixture
+def stubbed(monkeypatch, tmp_path):
+    (tmp_path / "f.py").write_text("x = 1\n")
+    monkeypatch.setattr(runner, "fetch_repo", lambda dataset: (tmp_path, "abc1234567890"))
+    monkeypatch.setattr(runner, "validate_dataset", lambda dataset, repo_dir: [])
+    monkeypatch.setattr(runner, "list_repo_files", lambda repo_dir: ["src/requests/utils.py"])
+    monkeypatch.setattr(runner, "build_zip", lambda repo_dir, files: b"zip")
+    monkeypatch.setattr(judge, "judge_facts", lambda q, a, facts, **kw: [True] + [False] * (len(facts) - 1))
+    monkeypatch.setattr(judge, "judge_faithful", lambda *a, **kw: True)
+    monkeypatch.setattr(judge, "judge_abstains", lambda *a, **kw: False)
+    monkeypatch.setattr(ollama, "chat", lambda *a, **kw: "risposta closed book")
+
+
+def test_check_spec_rejects_unknown_configs():
+    with pytest.raises(ValueError):
+        check_spec(RunSpec(dataset="requests", retrieval_configs=["inventata"]))
+    with pytest.raises(ValueError):
+        check_spec(RunSpec(dataset="requests", retrieval_configs=["closed_book"]))
+    check_spec(RunSpec(dataset="requests"))
+
+
+def test_full_run_writes_all_artifacts(stubbed):
+    spec = RunSpec(
+        dataset="requests", limit=3, retrieval_configs=["full", "naive"],
+        generation_configs=["full", "closed_book"], latency_questions=2, latency_repeats=1, latency_warmups=1,
+    )
+    execute_run("test-run", spec, client=FakeClient())
+
+    run_dir = runner.RESULTS_DIR / "test-run"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["status"] == "done", status
+
+    retrieval = [json.loads(line) for line in (run_dir / "retrieval.jsonl").read_text().splitlines()]
+    assert len(retrieval) == 6
+    assert retrieval[0]["metrics"]["symbol_hit@1"] == 1.0  # lk01: default_user_agent e' la prima fonte
+
+    generation = [json.loads(line) for line in (run_dir / "generation.jsonl").read_text().splitlines()]
+    closed_book = [row for row in generation if row["config"] == "closed_book"]
+    assert closed_book and all("faithfulness" not in row["metrics"] for row in closed_book)
+    assert all(row["metrics"]["citation_in_context"] is None for row in closed_book)
+    full = [row for row in generation if row["config"] == "full"]
+    assert full[0]["metrics"]["citation_exists"] == 0.5  # utils.py esiste, fake.py no
+
+    assert len((run_dir / "latency.jsonl").read_text().splitlines()) == 2  # 1 config x 2 domande x 1 ripetizione
+
+    report = (run_dir / "report.md").read_text()
+    for heading in ("## Retrieval", "## Generazione", "## Latenza", "Ablation"):
+        assert heading in report
+    assert (run_dir / "summary.csv").exists() and (run_dir / "manifest.json").exists()
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["dataset"]["commit"] == "abc1234567890"
+    assert manifest["indexing_job"]["indexing_seconds"] == 1.5
+
+
+def test_failed_run_records_error_in_status(monkeypatch):
+    def boom(dataset):
+        raise RuntimeError("git non raggiungibile")
+
+    monkeypatch.setattr(runner, "fetch_repo", boom)
+    execute_run("failing-run", RunSpec(dataset="requests"), client=FakeClient())
+    status = json.loads((runner.RESULTS_DIR / "failing-run" / "status.json").read_text())
+    assert status["status"] == "error" and "git non raggiungibile" in status["error"]

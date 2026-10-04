@@ -1,8 +1,0 @@
-{
-  "esperto_url": "http://localhost:5000",
-  "use_planner": true,
-  "use_reasoning": false,
-  "request_timeout_seconds": 180,
-  "max_output_chars": 20000,
-  "max_error_chars": 1000
-}

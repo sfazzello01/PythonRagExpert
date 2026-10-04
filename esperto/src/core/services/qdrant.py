@@ -14,11 +14,19 @@ from qdrant_client.http.exceptions import UnexpectedResponse  # type: ignore
 from qdrant_client.http.models import (  # type: ignore
     Distance,
     Filter,
+    Fusion,
+    FusionQuery,
     HasIdCondition,
+    HnswConfigDiff,
     MultiVectorComparator,
     MultiVectorConfig,
     PointStruct,
     Prefetch,
+    QuantizationSearchParams,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
+    ScalarType,
+    SearchParams,
     SparseVectorParams,
     VectorParams,
 )
@@ -32,9 +40,18 @@ from ..shared.settings import (
     QDRANT_QUERY_TIMEOUT,
     SEMANTIC_RELEVANCE_RATIO,
 )
+from ..shared.options import RetrievalOptions
 from ..shared.vectors import QueryVectors, lexical_weights_to_sparse_vector
 
 logger = logging.getLogger("EspertoQdrant")
+
+# Candidati della fusione dense+sparse riordinati dal reranker ColBERT.
+RERANK_CANDIDATE_LIMIT = 75
+
+# Con scalar quantization attiva, rescore sui vettori originali per la qualita'.
+_QUANTIZATION_PARAMS = SearchParams(
+    quantization=QuantizationSearchParams(ignore=False, rescore=True, oversampling=2.0)
+)
 
 
 def get_sync_client() -> QdrantClient:
@@ -102,11 +119,32 @@ def ensure_hybrid_collection(client: QdrantClient, recreate: bool = False) -> No
     client.create_collection(
         collection_name=QDRANT_COLLECTION,
         vectors_config={
-            "dense": VectorParams(size=DENSE_DIMENSION, distance=Distance.COSINE),
+            "dense": VectorParams(
+                size=DENSE_DIMENSION,
+                distance=Distance.COSINE,
+                quantization_config=ScalarQuantization(
+                    scalar=ScalarQuantizationConfig(
+                        type=ScalarType.INT8,
+                        quantile=0.99,
+                        always_ram=True,
+                    )
+                ),
+            ),
+            # ColBERT non indicizzato: solo storage su disco + int8, usato come
+            # reranker sui candidati della fusione dense+sparse (hybrid_search).
             "colbert": VectorParams(
                 size=DENSE_DIMENSION,
                 distance=Distance.COSINE,
+                on_disk=True,
+                hnsw_config=HnswConfigDiff(m=0),
                 multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
+                quantization_config=ScalarQuantization(
+                    scalar=ScalarQuantizationConfig(
+                        type=ScalarType.INT8,
+                        quantile=0.99,
+                        always_ram=False,
+                    )
+                ),
             ),
         },
         sparse_vectors_config={"sparse": SparseVectorParams()},
@@ -155,7 +193,12 @@ async def _query_colbert(client: AsyncQdrantClient, **kwargs) -> list[Document]:
     """Run a ColBERT query_points call with the shared timeout/error handling."""
     try:
         response = await asyncio.wait_for(
-            client.query_points(collection_name=QDRANT_COLLECTION, using="colbert", **kwargs),
+            client.query_points(
+                collection_name=QDRANT_COLLECTION,
+                using="colbert",
+                search_params=_QUANTIZATION_PARAMS,
+                **kwargs,
+            ),
             timeout=QDRANT_QUERY_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -187,17 +230,53 @@ async def hybrid_search(
     query_vectors: QueryVectors,
     limit: int,
     query_filter: Optional[Filter] = None,
+    options: RetrievalOptions = RetrievalOptions(),
 ) -> list[Document]:
-    """Run dense+sparse prefetch followed by ColBERT MaxSim reranking."""
+    """Fusione dense+sparse (RRF) seguita da reranking ColBERT sui soli candidati."""
+    prefetch = []
+    if options.use_dense:
+        prefetch.append(Prefetch(query=query_vectors.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter))
+    if options.use_sparse:
+        prefetch.append(Prefetch(query=query_vectors.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter))
+    try:
+        response = await asyncio.wait_for(
+            client.query_points(
+                collection_name=QDRANT_COLLECTION,
+                prefetch=prefetch,
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=RERANK_CANDIDATE_LIMIT if options.use_colbert else limit,
+                query_filter=query_filter,
+                search_params=_QUANTIZATION_PARAMS,
+                with_payload=not options.use_colbert,
+            ),
+            timeout=QDRANT_QUERY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Qdrant fusion query timeout after %ss", QDRANT_QUERY_TIMEOUT)
+        return []
+    except Exception as error:
+        logger.error("Qdrant fusion query failed: %s: %s", type(error).__name__, error)
+        return []
+
+    if not response.points:
+        return []
+
+    if not options.use_colbert:
+        # Lo score RRF e' salvato nella stessa chiave dello score ColBERT.
+        return [
+            Document(
+                page_content=point.payload.get("page_content", ""),
+                metadata={**point.payload.get("metadata", {}), "_colbert_score": point.score},
+            )
+            for point in response.points
+        ]
+
+    # I candidati rispettano gia' query_filter: il rerank li riordina per ID.
     return await _query_colbert(
         client,
-        prefetch=[
-            Prefetch(query=query_vectors.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter),
-            Prefetch(query=query_vectors.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter),
-        ],
         query=query_vectors.colbert,
         limit=limit,
-        query_filter=query_filter,
+        query_filter=Filter(must=[HasIdCondition(has_id=[point.id for point in response.points])]),
         with_payload=True,
     )
 

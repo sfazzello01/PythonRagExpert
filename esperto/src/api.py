@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.responses import StreamingResponse  # type: ignore
 from pydantic import BaseModel, Field
 
-from .rag import stream_expert_response
+from .rag import retrieve_only, stream_expert_response
 from config import (
     QDRANT_COLLECTION,
     MAX_MESSAGE_LENGTH,
@@ -15,6 +15,7 @@ from config import (
     LLM_INFERENCE_TIMEOUT,
 )
 from .core.services.qdrant import get_sync_client
+from .core.shared.options import RetrievalOptions
 
 logger = logging.getLogger("EspertoAPI")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -31,6 +32,13 @@ class ChatRequest(BaseModel):
     )
     use_planner: bool = Field(default=True, description="Use the LLM retrieval planner")
     use_reasoning: bool = Field(default=False, description="Stream the model reasoning before the answer")
+    retrieval: RetrievalOptions = Field(default_factory=RetrievalOptions, description="Retrieval stage switches (ablation)")
+
+
+class RetrieveRequest(BaseModel):
+    message: str = Field(..., min_length=MIN_MESSAGE_LENGTH, max_length=MAX_MESSAGE_LENGTH)
+    use_planner: bool = True
+    retrieval: RetrievalOptions = Field(default_factory=RetrievalOptions)
 
 
 @app.get("/health")
@@ -71,6 +79,16 @@ def health_check():
         raise HTTPException(status_code=503, detail=f"Errore health check: {str(e)}")
 
 
+@app.post("/retrieve")
+async def retrieve(request: RetrieveRequest) -> dict:
+    """Planner + retrieval senza generazione: restituisce sotto-domande e fonti."""
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Il messaggio non puo' essere vuoto.")
+    _, subquestions, sources = await retrieve_only(message, request.use_planner, request.retrieval)
+    return {"subquestions": subquestions, "sources": sources}
+
+
 @app.post("/ask")
 async def ask_expert(request: ChatRequest) -> StreamingResponse:
     """
@@ -97,6 +115,7 @@ async def ask_expert(request: ChatRequest) -> StreamingResponse:
                 message,
                 use_planner=request.use_planner,
                 use_reasoning=request.use_reasoning,
+                options=request.retrieval,
             ):
                 yield chunk
         except asyncio.TimeoutError:

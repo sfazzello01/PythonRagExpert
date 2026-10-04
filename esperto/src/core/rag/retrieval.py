@@ -17,6 +17,7 @@ from ..services.qdrant import (
     rerank_chunk_ids,
 )
 from ..services.symbol_graph import SymbolGraph
+from ..shared.options import RetrievalOptions
 from ..shared.settings import (
     K,
     RAG_CONTEXT_MAX_CHARS,
@@ -81,6 +82,7 @@ class HybridRetriever:
     async def retrieve_with_sources(
         self,
         question: str,
+        options: RetrievalOptions = RetrievalOptions(),
     ) -> tuple[str, list[dict]]:
         """Build de-duplicated context and return the ranked source chunks."""
         queries = expand_queries(question)
@@ -90,7 +92,10 @@ class HybridRetriever:
         query_vectors = await asyncio.to_thread(encode_queries, queries)
         original_query_vectors = query_vectors[0]
         initial_results = await asyncio.gather(
-            *(hybrid_search(self._client, query_vectors, limit=K) for query_vectors in query_vectors)
+            *(
+                hybrid_search(self._client, query_vectors, limit=K, options=options)
+                for query_vectors in query_vectors
+            )
         )
         unique_documents = _keep_highest_scoring(
             document for results in initial_results for document in results
@@ -99,7 +104,7 @@ class HybridRetriever:
         processed_files: set[str] = set()
         for document in unique_documents:
             filename = document.metadata.get("filename")
-            if not filename:
+            if not filename or not options.use_same_file:
                 final_documents.append(document)
                 continue
             if filename in processed_files:
@@ -118,17 +123,22 @@ class HybridRetriever:
                         )
                     ]
                 ),
+                options=options,
             )
             final_documents.extend(same_file_documents or [document])
 
         ranked_documents = sorted(_keep_highest_scoring(final_documents), key=_document_sort_key)
-        graph_relations = self._symbol_graph.related_chunks(
-            {
-                chunk_id
-                for document in ranked_documents
-                if (chunk_id := document.metadata.get("chunk_id"))
-            },
-            limit=SYMBOL_GRAPH_MAX_NEIGHBORS,
+        graph_relations = (
+            self._symbol_graph.related_chunks(
+                {
+                    chunk_id
+                    for document in ranked_documents
+                    if (chunk_id := document.metadata.get("chunk_id"))
+                },
+                limit=SYMBOL_GRAPH_MAX_NEIGHBORS,
+            )
+            if options.use_symbol_graph
+            else {}
         )
         graph_documents = await get_documents_by_chunk_ids(
             self._client,
@@ -169,6 +179,7 @@ class HybridRetriever:
         self,
         questions: list[str],
         original_question: str,
+        options: RetrievalOptions = RetrievalOptions(),
     ) -> tuple[str, list[dict]]:
         """Merge planner contexts, rerank candidates, and apply one shared budget."""
         retrieval_questions = [
@@ -181,7 +192,7 @@ class HybridRetriever:
         ][:4]
         results = await asyncio.gather(
             *(
-                self.retrieve_with_sources(question)
+                self.retrieve_with_sources(question, options)
                 for question in retrieval_questions
             )
         )
@@ -190,6 +201,14 @@ class HybridRetriever:
             for source in sources:
                 key = (source.get("filename"), source.get("chunk_id"))
                 sources_by_key.setdefault(key, source)
+        if not options.use_colbert:
+            sources = sorted(
+                sources_by_key.values(),
+                key=lambda source: -(source.get("score") or 0.0),
+            )
+            sources = _apply_context_budget(sources, lambda source: len(source["content"]))
+            return "\n\n---\n\n".join(source["content"] for source in sources), sources
+
         candidate_chunk_ids = [
             chunk_id
             for source in sources_by_key.values()

@@ -204,13 +204,17 @@ def _execute_job(job_id: str, content: bytes, names: list[str]) -> None:
         # cosi' in caso di riavvio il prossimo run vede i nuovi sorgenti.
         _activate(staging)
 
+        index_start = time.time()
         success, log_tail = _run_indexer_subprocess(staging)
+        indexing_seconds = round(time.time() - index_start, 2)
+        logger.info("Job %s: indicizzazione durata %.2fs.", job_id, indexing_seconds)
         if success:
             _update_job(
                 job_id,
                 status=JOB_READY,
                 finished_at=time.time(),
                 error=None,
+                indexing_seconds=indexing_seconds,
             )
             logger.info("Job %s completato.", job_id)
         else:
@@ -219,6 +223,7 @@ def _execute_job(job_id: str, content: bytes, names: list[str]) -> None:
                 status=JOB_ERROR,
                 finished_at=time.time(),
                 error=log_tail[-1000:],
+                indexing_seconds=indexing_seconds,
             )
             logger.error("Job %s fallito: %s", job_id, log_tail[-500:])
     except Exception as e:
