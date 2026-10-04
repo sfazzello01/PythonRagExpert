@@ -7,8 +7,10 @@ ESPERTO_URL = os.getenv("ESPERTO_URL", "http://esperto:5000")
 INDEXER_URL = os.getenv("ESPERTO_INDEXER_URL", "http://esperto_indexer:5001")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 
-# Giudice e closed-book usano il modello di esperto (scelta dichiarata come limite in tesi).
-JUDGE_MODEL = os.getenv("JUDGE_MODEL") or os.getenv("LLM_MODEL", "")
+# Closed-book usa il modello di esperto; il giudice anche, salvo JUDGE_MODEL
+# (giudice = generatore e' un limite da dichiarare in tesi).
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+JUDGE_MODEL = os.getenv("JUDGE_MODEL") or LLM_MODEL
 JUDGE_CONTEXT_MAX_CHARS = int(os.getenv("JUDGE_CONTEXT_MAX_CHARS", "40000"))
 
 REQUEST_TIMEOUT = float(os.getenv("BENCHMARK_REQUEST_TIMEOUT", "300"))
@@ -39,6 +41,6 @@ MANIFEST_ENV_KEYS = (
     "SYMBOL_GRAPH_MAX_NEIGHBORS",
     "SYMBOL_GRAPH_MAX_DEPTH",
     "SYMBOL_GRAPH_PAGERANK_DAMPING",
-    "RAG_CONTEXT_MAX_CHARS",
+    "LLM_CONTEXT_TOKENS",
     "RAG_CONTEXT_MAX_SOURCES",
 )

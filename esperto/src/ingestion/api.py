@@ -41,7 +41,8 @@ async def upload_zip(file: UploadFile = File(...)) -> dict:
         Dettagli del job accettato (status queued).
     """
     filename = file.filename or "upload.zip"
-    content = await file.read()
+    # Un byte oltre il limite basta a validate_zip per rifiutare senza caricare tutto in RAM.
+    content = await file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
 
     try:
         names = validate_zip(content, filename)

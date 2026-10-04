@@ -46,7 +46,10 @@ class EspertoClient:
 
     def ask(self, question: str, use_planner: bool, options: dict) -> dict:
         """Consuma lo stream NDJSON di /ask misurando tempi di fonti, primo token e totale."""
-        result = {"subquestions": [], "sources": [], "answer": "", "retrieval_s": None, "ttft_s": None, "error": None}
+        result = {
+            "subquestions": [], "sources": [], "repo_map": "", "answer": "",
+            "retrieval_s": None, "ttft_s": None, "error": None,
+        }
         start = time.perf_counter()
         payload = {"message": question, "use_planner": use_planner, "retrieval": options}
         with self._http.stream("POST", f"{ESPERTO_URL}/ask", json=payload) as response:
@@ -63,6 +66,7 @@ class EspertoClient:
                 if event["type"] == "sources":
                     result["sources"] = event["data"]["sources"]
                     result["subquestions"] = event["data"]["subquestions"]
+                    result["repo_map"] = event["data"].get("repo_map", "")
                     result["retrieval_s"] = now
                 elif event["type"] == "answer":
                     if result["ttft_s"] is None:

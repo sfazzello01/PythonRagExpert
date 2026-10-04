@@ -26,7 +26,6 @@ _DEFAULT_ENV = {
     "EMBEDDING_MAX_LENGTH": "1024",
     "MAX_MESSAGE_LENGTH": "5000",
     "MIN_MESSAGE_LENGTH": "3",
-    "MODEL_LOAD_TIMEOUT": "60",
     "QDRANT_QUERY_TIMEOUT": "30",
     "LLM_INFERENCE_TIMEOUT": "300",
     "BASE_DIR": "/tmp/esperto-test-base",
@@ -36,7 +35,6 @@ _DEFAULT_ENV = {
     "INDEX_STATE_DIR": "/tmp/esperto-test-state",
     "SUPPORTED_EXTENSIONS": ".py,.yaml,.yml,.md,.txt,.html,.json,.js",
     "SKIP_DIRS": "__pycache__,.git",
-    "INDEX_TARGET_PATHS": ".",
 }
 
 for key, value in _DEFAULT_ENV.items():

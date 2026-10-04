@@ -9,13 +9,15 @@ import httpx
 from config import JUDGE_MODEL, OLLAMA_URL, REQUEST_TIMEOUT
 
 
-def chat(prompt: str, system: Optional[str] = None, schema: Optional[dict] = None) -> str:
+def chat(
+    prompt: str, system: Optional[str] = None, schema: Optional[dict] = None, model: str = JUDGE_MODEL
+) -> str:
     """Una chiamata deterministica (temperature 0, senza thinking); `schema` vincola l'output JSON."""
     messages = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": prompt}
     ]
     payload = {
-        "model": JUDGE_MODEL,
+        "model": model,
         "messages": messages,
         "stream": False,
         "think": False,

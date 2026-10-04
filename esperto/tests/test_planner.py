@@ -1,6 +1,9 @@
 """Unit test per il parsing delle sotto-domande del planner."""
 
-from src.core.rag.planner import parse_subquestions
+import asyncio
+from types import SimpleNamespace
+
+from src.core.rag.planner import parse_subquestions, plan_subquestions
 
 
 def test_parse_valid_json():
@@ -37,3 +40,27 @@ def test_empty_valid_list_falls_back_to_original():
     assert parse_subquestions('{"subquestions": []}', "Domanda originale") == [
         "Domanda originale"
     ]
+
+
+def _planned_prompt(repo_map: str) -> str:
+    prompts = []
+
+    async def ainvoke(prompt):
+        prompts.append(prompt)
+        return SimpleNamespace(content='{"subquestions": ["Cosa fa Session?"]}')
+
+    result = asyncio.run(plan_subquestions("A cosa serve?", SimpleNamespace(ainvoke=ainvoke), repo_map))
+    assert result == ["Cosa fa Session?"]
+    return prompts[0]
+
+
+def test_planner_prompt_includes_the_repo_map_when_given():
+    prompt = _planned_prompt("src/api.py: Session {x}")
+    assert "MAPPA DEL REPOSITORY:\nsrc/api.py: Session {x}" in prompt
+    assert "nella domanda o nella mappa" in prompt
+
+
+def test_planner_prompt_without_map_forbids_new_names():
+    prompt = _planned_prompt("")
+    assert "MAPPA" not in prompt
+    assert "non presenti nella domanda." in prompt

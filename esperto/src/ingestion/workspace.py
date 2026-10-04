@@ -15,14 +15,15 @@ import uuid
 import zipfile
 from pathlib import Path
 
+from config import INDEX_STATE_DIR, INGESTION_WORKSPACE_DIR
+
 logger = logging.getLogger("EspertoIngestion")
 
-WORKSPACE_ROOT = Path(os.getenv("INGESTION_WORKSPACE_DIR", "/app/workspace"))
+WORKSPACE_ROOT = INGESTION_WORKSPACE_DIR
 CURRENT_LINK = WORKSPACE_ROOT / "current"
-UPLOADS_DIR = WORKSPACE_ROOT / "uploads"
 
 _STATE_LOCK = threading.Lock()
-_STATE_FILE: Path | None = None
+_STATE_FILE = INDEX_STATE_DIR / "index_jobs.json"
 
 JOB_QUEUED = "queued"
 JOB_INDEXING = "indexing"
@@ -32,22 +33,13 @@ JOB_ERROR = "error"
 _current_job: dict | None = None
 
 
-def _state_file() -> Path:
-    global _STATE_FILE
-    if _STATE_FILE is None:
-        state_dir = Path(os.getenv("INDEX_STATE_DIR", "/app/state"))
-        _STATE_FILE = state_dir / "index_jobs.json"
-    return _STATE_FILE
-
-
 def _load_job() -> dict | None:
     global _current_job
     if _current_job is not None:
         return _current_job
-    state_file = _state_file()
-    if state_file.exists():
+    if _STATE_FILE.exists():
         try:
-            _current_job = json.loads(state_file.read_text(encoding="utf-8"))
+            _current_job = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
         except Exception as e:
             logger.warning("Stato job non leggibile: %s", e)
             _current_job = None
@@ -68,9 +60,8 @@ def _load_job() -> dict | None:
 def _save_job(job: dict) -> None:
     global _current_job
     _current_job = job
-    state_file = _state_file()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(job, indent=2), encoding="utf-8")
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _STATE_FILE.write_text(json.dumps(job, indent=2), encoding="utf-8")
 
 
 def current_job_status() -> dict:
@@ -95,7 +86,6 @@ def extract_to_workspace(content: bytes, names: list[str]) -> Path:
     """
     staging = WORKSPACE_ROOT / f"job-{uuid.uuid4().hex[:12]}"
     staging.mkdir(parents=True, exist_ok=False)
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         allowed = set(names)
@@ -113,12 +103,15 @@ def extract_to_workspace(content: bytes, names: list[str]) -> Path:
 
 
 def _activate(staging: Path) -> None:
-    """Attiva atomicamente la directory di staging come workspace corrente."""
+    """Attiva atomicamente la directory di staging e rimuove le estrazioni precedenti."""
     tmp_link = WORKSPACE_ROOT / ".current.tmp"
     if tmp_link.exists() or tmp_link.is_symlink():
         tmp_link.unlink()
     tmp_link.symlink_to(staging)
     os.replace(tmp_link, CURRENT_LINK)
+    for previous in WORKSPACE_ROOT.glob("job-*"):
+        if previous != staging:
+            shutil.rmtree(previous, ignore_errors=True)
 
 
 def _run_indexer_subprocess(staging: Path) -> tuple[bool, str]:
@@ -126,18 +119,17 @@ def _run_indexer_subprocess(staging: Path) -> tuple[bool, str]:
     Lancia la pipeline di indicizzazione come processo separato con env override.
 
     La configurazione dell'indicizzazione viene risolta a import-time, quindi
-    l'override di BASE_DIR/INDEX_TARGET_PATHS deve avvenire in un processo nuovo.
+    l'override di BASE_DIR deve avvenire in un processo nuovo.
 
     Returns:
         (successo, output_coda) tupla con esito e ultime righe di log.
     """
     env = os.environ.copy()
     env["BASE_DIR"] = str(staging)
-    env["INDEX_TARGET_PATHS"] = "."
 
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "src.indicizzatore"],
+            [sys.executable, "-m", "src.core.indexing.pipeline"],
             env=env,
             capture_output=True,
             text=True,
@@ -200,15 +192,12 @@ def _execute_job(job_id: str, content: bytes, names: list[str]) -> None:
 
         staging = extract_to_workspace(content, names)
 
-        # Punta la workspace corrente alla nuova estrazione prima di indicizzare,
-        # cosi' in caso di riavvio il prossimo run vede i nuovi sorgenti.
-        _activate(staging)
-
         index_start = time.time()
         success, log_tail = _run_indexer_subprocess(staging)
         indexing_seconds = round(time.time() - index_start, 2)
         logger.info("Job %s: indicizzazione durata %.2fs.", job_id, indexing_seconds)
         if success:
+            _activate(staging)
             _update_job(
                 job_id,
                 status=JOB_READY,

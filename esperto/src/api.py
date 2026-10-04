@@ -1,19 +1,18 @@
 import asyncio
 import logging
-import os
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.responses import StreamingResponse  # type: ignore
 from pydantic import BaseModel, Field
 
-from .rag import retrieve_only, stream_expert_response
 from config import (
+    INDEX_COMPLETE_FILE,
     QDRANT_COLLECTION,
     MAX_MESSAGE_LENGTH,
     MIN_MESSAGE_LENGTH,
     LLM_INFERENCE_TIMEOUT,
 )
+from .core.rag.chain import retrieve_only, stream_expert_response
 from .core.services.qdrant import get_sync_client
 from .core.shared.options import RetrievalOptions
 
@@ -50,11 +49,8 @@ def health_check():
         Dict con stato del servizio e dell'indicizzazione.
     """
     try:
-        state_dir = Path(os.getenv("INDEX_STATE_DIR", "/app/state"))
-        flag_file = state_dir / "index_complete"
-        
         # Verifica se il file flag esiste (indicizzazione completata)
-        if not flag_file.exists():
+        if not INDEX_COMPLETE_FILE.exists():
             return {
                 "status": "not_indexed",
                 "message": "Indice non presente: caricare uno ZIP tramite il servizio di ingestion"
@@ -85,7 +81,7 @@ async def retrieve(request: RetrieveRequest) -> dict:
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Il messaggio non puo' essere vuoto.")
-    _, subquestions, sources = await retrieve_only(message, request.use_planner, request.retrieval)
+    subquestions, sources = await retrieve_only(message, request.use_planner, request.retrieval)
     return {"subquestions": subquestions, "sources": sources}
 
 
@@ -109,17 +105,22 @@ async def ask_expert(request: ChatRequest) -> StreamingResponse:
     logger.info(f"Query received: {len(message)} chars")
     
     async def timeout_wrapper():
-        """Wrapper with timeout to prevent indefinite streaming."""
+        """Wrapper with an overall deadline to prevent indefinite streaming."""
+        stream = stream_expert_response(
+            message,
+            use_planner=request.use_planner,
+            use_reasoning=request.use_reasoning,
+            options=request.retrieval,
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + LLM_INFERENCE_TIMEOUT
         try:
-            async for chunk in stream_expert_response(
-                message,
-                use_planner=request.use_planner,
-                use_reasoning=request.use_reasoning,
-                options=request.retrieval,
-            ):
-                yield chunk
+            while True:
+                yield await asyncio.wait_for(anext(stream), deadline - loop.time())
+        except StopAsyncIteration:
+            return
         except asyncio.TimeoutError:
-            logger.error(f"LLM inference timeout after {LLM_INFERENCE_TIMEOUT}s")
+            logger.error(f"Timeout during streaming (limit {LLM_INFERENCE_TIMEOUT}s)")
             yield "[ERROR] La risposta ha superato il timeout massimo."
         except Exception as e:
             logger.error(f"Error during streaming: {type(e).__name__}: {str(e)}")

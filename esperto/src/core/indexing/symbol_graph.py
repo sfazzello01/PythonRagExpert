@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ..shared.settings import BASE_DIR, SYMBOL_GRAPH_FILE, SYMBOL_GRAPH_VERSION
+from config import SYMBOL_GRAPH_FILE, SYMBOL_GRAPH_VERSION
+
+from .chunking import splits_into_methods, symbol_chunk_id
+from .discovery import relative_path
 
 logger = logging.getLogger("EspertoSymbolGraph")
 
@@ -37,26 +39,13 @@ class SymbolEdge:
     line: int
 
 
-def _relative_path(path: Path) -> str:
-    try:
-        return path.relative_to(BASE_DIR).as_posix()
-    except ValueError:
-        return path.as_posix()
-
-
 def _module_name(path: Path) -> str:
-    relative = _relative_path(path)
+    relative = relative_path(path)
     if relative.endswith("/__init__.py"):
         relative = relative[: -len("/__init__.py")]
     elif relative.endswith(".py"):
         relative = relative[:-3]
     return relative.replace("/", ".")
-
-
-def _chunk_id(filename: str, name: str, start_line: int, end_line: int) -> str:
-    return hashlib.md5(
-        f"{filename}::{name}::{start_line - 1}::{end_line}".encode("utf-8")
-    ).hexdigest()
 
 
 def _attribute_name(node: ast.AST) -> str | None:
@@ -76,6 +65,7 @@ class _GraphVisitor(ast.NodeVisitor):
         self.nodes: list[SymbolNode] = []
         self.edges: list[SymbolEdge] = []
         self.scope: list[str] = []
+        self.split_classes: set[str] = set()
         self.imports: dict[str, str] = {}
 
     @property
@@ -100,7 +90,6 @@ class _GraphVisitor(ast.NodeVisitor):
         symbol_id = "::".join((self.module, *self.scope, name))
         start_line = getattr(node, "lineno", 1)
         end_line = getattr(node, "end_lineno", start_line) or start_line
-        top_level = not self.scope
         self.nodes.append(
             SymbolNode(
                 id=symbol_id,
@@ -109,11 +98,20 @@ class _GraphVisitor(ast.NodeVisitor):
                 filename=self.filename,
                 start_line=start_line,
                 end_line=end_line,
-                chunk_id=_chunk_id(self.filename, name, start_line, end_line) if top_level else None,
+                chunk_id=self._chunk_id(node, name),
             )
         )
         self.edges.append(SymbolEdge(self.current_id, symbol_id, "defines", start_line))
         return symbol_id
+
+    def _chunk_id(self, node: ast.AST, name: str) -> str | None:
+        """ID of the chunk holding the symbol: top-level symbols and methods of split classes."""
+        if not self.scope:
+            return symbol_chunk_id(self.filename, name, node)
+        is_method = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and len(self.scope) == 1
+        if is_method and self.scope[0] in self.split_classes:
+            return symbol_chunk_id(self.filename, f"{self.scope[0]}.{name}", node)
+        return None
 
     def _visit_definition(self, node: ast.AST, kind: str, name: str) -> None:
         self._add_symbol(node, kind, name)
@@ -127,6 +125,8 @@ class _GraphVisitor(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if not self.scope and splits_into_methods(node):
+            self.split_classes.add(node.name)
         class_id = self._add_symbol(node, "class", node.name)
         for base in node.bases:
             target = self._resolve_reference(_attribute_name(base))
@@ -206,34 +206,31 @@ class _DefinitionVisitor(ast.NodeVisitor):
         self._visit_definition(node, node.name)
 
 
-def _collect_definition_ids(files: list[Path]) -> set[str]:
-    definitions: set[str] = set()
+def _parse(files: list[Path]) -> dict[Path, ast.Module]:
+    trees: dict[Path, ast.Module] = {}
     for path in files:
-        module = _module_name(path)
-        definitions.add(module)
+        if path.suffix != ".py":
+            continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+            trees[path] = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
         except (OSError, SyntaxError) as error:
             logger.warning("Cannot parse %s for symbol graph: %s", path, error)
-            continue
-        visitor = _DefinitionVisitor(module)
-        visitor.visit(tree)
-        definitions.update(visitor.definitions)
-    return definitions
+    return trees
 
 
 def build_symbol_graph(files: list[Path]) -> dict:
     """Build a static graph for Python files without importing application code."""
-    python_files = [path for path in files if path.suffix == ".py"]
-    definitions = _collect_definition_ids(python_files)
+    trees = _parse(files)
+    # Primo passaggio: tutte le definizioni, necessarie per risolvere chiamate tra moduli.
+    definitions: set[str] = set()
+    for path, tree in trees.items():
+        definition_visitor = _DefinitionVisitor(_module_name(path))
+        definition_visitor.visit(tree)
+        definitions.update(definition_visitor.definitions)
     nodes: list[SymbolNode] = []
     edges: list[SymbolEdge] = []
-    for path in python_files:
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-        except (OSError, SyntaxError):
-            continue
-        visitor = _GraphVisitor(_relative_path(path), _module_name(path), definitions)
+    for path, tree in trees.items():
+        visitor = _GraphVisitor(relative_path(path), _module_name(path), definitions)
         visitor.visit(tree)
         nodes.extend(visitor.nodes)
         edges.extend(visitor.edges)

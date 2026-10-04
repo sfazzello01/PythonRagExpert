@@ -18,6 +18,8 @@ RETRIEVAL_COLUMNS = [
     ("symbol_ndcg@10", "Symbol nDCG@10"),
     ("symbol_context_recall", "Symbol ctx recall"),
     ("hop2_symbol_recall", "Hop-2 recall"),
+    ("n_sources", "N fonti"),
+    ("context_chars", "Caratteri contesto"),
 ]
 DELTA_METRICS = ["symbol_mrr", "symbol_recall@5", "symbol_context_recall", "hop2_symbol_recall"]
 GENERATION_COLUMNS = [
@@ -130,6 +132,12 @@ def _category_table(rows: list[dict], metric: str) -> str:
     )
 
 
+def _error_note(rows: list[dict]) -> list[str]:
+    """Avviso sulle richieste fallite, che non entrano nelle medie."""
+    failed = sum(bool(row.get("error")) for row in rows)
+    return [f"**Attenzione**: {failed} richieste fallite su {len(rows)}, escluse dalle medie."] if failed else []
+
+
 def _latency_table(rows: list[dict]) -> str:
     def cell(config: str, metric: str) -> str:
         stat = _stat(_values(rows, config, metric))
@@ -181,7 +189,8 @@ def _write_csv(path: Path, entries: list[dict]) -> None:
 
 def write_report(run_dir: Path, labels_path: Path) -> None:
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    retrieval = [r for r in _load(run_dir / "retrieval.jsonl") if "metrics" in r]
+    retrieval_rows = _load(run_dir / "retrieval.jsonl")
+    retrieval = [r for r in retrieval_rows if "metrics" in r]
     generation = _load(run_dir / "generation.jsonl")
     latency = _load(run_dir / "latency.jsonl")
 
@@ -204,14 +213,14 @@ def write_report(run_dir: Path, labels_path: Path) -> None:
     header = "\n".join([
         f"- Dataset: `{dataset['name']}` ({dataset['repo_url']} @ `{dataset['ref']}`, commit `{dataset['commit'][:10]}`)",
         f"- Domande: {categories} (sha256 `{dataset['questions_sha256'][:12]}`)",
-        f"- Modello esperto e giudice: `{manifest['judge_model']}`",
+        f"- Modello esperto: `{manifest['rag_params']['LLM_MODEL']}`; giudice: `{manifest['judge_model']}`",
         f"- Indicizzazione: {job.get('indexing_seconds', 'n/d')} s, {manifest['esperto_health'].get('points_count', 'n/d')} punti",
         "- Celle: media [IC 95% bootstrap sulle domande]; `*` = differenza appaiata con IC che esclude 0.",
     ])
     sections = [f"# Benchmark {manifest['run_id']}", header]
     if retrieval:
         sections += [
-            "## Retrieval", _metric_table(retrieval, RETRIEVAL_COLUMNS),
+            "## Retrieval", *_error_note(retrieval_rows), _metric_table(retrieval, RETRIEVAL_COLUMNS),
             "### Ablation: differenza rispetto a `full`", _delta_table(retrieval),
             "### Symbol Recall@5 per categoria", _category_table(retrieval, "symbol_recall@5"),
         ]
@@ -221,5 +230,5 @@ def write_report(run_dir: Path, labels_path: Path) -> None:
             "### Validazione del giudice contro etichette umane", _judge_agreement(generation, labels_path),
         ]
     if latency:
-        sections += ["## Latenza", _latency_table(latency)]
+        sections += ["## Latenza", *_error_note(latency), _latency_table(latency)]
     (run_dir / "report.md").write_text("\n\n".join(sections) + "\n", encoding="utf-8")

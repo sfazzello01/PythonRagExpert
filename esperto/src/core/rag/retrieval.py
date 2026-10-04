@@ -1,13 +1,22 @@
-"""Hybrid retrieval, parent retrieval, score deduplication, and context assembly."""
+"""Hybrid retrieval, same-file and symbol-graph enrichment, final rerank, and context budget."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Iterable, TypeVar
+from itertools import chain
+from typing import Iterable
 
 from langchain_core.documents import Document
 from qdrant_client import AsyncQdrantClient  # type: ignore
 from qdrant_client.http.models import FieldCondition, Filter, MatchValue  # type: ignore
+
+from config import (
+    K,
+    RAG_CONTEXT_MAX_CHARS,
+    RAG_CONTEXT_MAX_SOURCES,
+    SEMANTIC_RELEVANCE_RATIO,
+    SYMBOL_GRAPH_MAX_NEIGHBORS,
+)
 
 from ..services.embedding import encode_queries
 from ..services.qdrant import (
@@ -18,58 +27,51 @@ from ..services.qdrant import (
 )
 from ..services.symbol_graph import SymbolGraph
 from ..shared.options import RetrievalOptions
-from ..shared.settings import (
-    K,
-    RAG_CONTEXT_MAX_CHARS,
-    RAG_CONTEXT_MAX_SOURCES,
-    SYMBOL_GRAPH_MAX_NEIGHBORS,
-)
-from .query import expand_queries
+from ..shared.text import sanitize_text
+from ..shared.vectors import QueryVectors
+
+SAME_FILE_LIMIT = 4
 
 
 def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
-    """Deduplicate equal chunks while retaining their best ColBERT score.
-
-    La chiave e' il chunk_id (stabile per simbolo/posizione); due chunk con lo
-    stesso testo in file diversi restano distinti.
-    """
+    """Deduplicate chunks by chunk_id while retaining their best score."""
     by_id: dict[str, Document] = {}
     for document in documents:
-        key = document.metadata.get("chunk_id") or document.page_content
-        previous = by_id.get(key)
+        previous = by_id.get(document.metadata["chunk_id"])
         if previous is None or document.metadata["_colbert_score"] > previous.metadata["_colbert_score"]:
-            by_id[key] = document
+            by_id[document.metadata["chunk_id"]] = document
     return list(by_id.values())
 
 
-def _document_sort_key(document: Document) -> float:
-    return -document.metadata.get("_colbert_score", 0.0)
-
-
-T = TypeVar("T")
-
-
-def _apply_context_budget(items: Iterable[T], size_of: Callable[[T], int]) -> list[T]:
-    """Keep items within the shared source-count and character budgets."""
-    selected: list[T] = []
+def _apply_context_budget(documents: Iterable[Document], max_sources: int, max_chars: int) -> list[Document]:
+    """Keep ranked documents within the given source-count and character budgets."""
+    selected: list[Document] = []
     total_characters = 0
-    for item in items:
-        if len(selected) >= RAG_CONTEXT_MAX_SOURCES:
+    for document in documents:
+        if len(selected) >= max_sources:
             break
-        item_size = size_of(item)
-        if selected and total_characters + item_size > RAG_CONTEXT_MAX_CHARS:
+        size = len(document.page_content)
+        if selected and total_characters + size > max_chars:
             continue
-        selected.append(item)
-        total_characters += item_size
+        selected.append(document)
+        total_characters += size
     return selected
 
 
-def _limit_context_documents(documents: Iterable[Document]) -> list[Document]:
-    """Keep the most direct evidence within a stable source and character budget."""
-    return _apply_context_budget(
-        sorted(documents, key=_document_sort_key),
-        lambda document: len(document.page_content),
-    )
+def _to_source(document: Document, score: float | None) -> dict:
+    metadata = document.metadata
+    return {
+        "filename": metadata.get("filename"),
+        "service": metadata.get("service"),
+        "chunk_type": metadata.get("chunk_type"),
+        "symbol_name": metadata.get("symbol_name"),
+        "start_line": metadata.get("start_line"),
+        "end_line": metadata.get("end_line"),
+        "chunk_id": metadata["chunk_id"],
+        "score": score,
+        "graph_relation": metadata.get("_graph_relation"),
+        "content": document.page_content,
+    }
 
 
 class HybridRetriever:
@@ -79,109 +81,50 @@ class HybridRetriever:
         self._client = client or get_async_client()
         self._symbol_graph = SymbolGraph()
 
-    async def retrieve_with_sources(
-        self,
-        question: str,
-        options: RetrievalOptions = RetrievalOptions(),
-    ) -> tuple[str, list[dict]]:
-        """Build de-duplicated context and return the ranked source chunks."""
-        queries = expand_queries(question)
-        if not queries:
-            return "", []
-
-        query_vectors = await asyncio.to_thread(encode_queries, queries)
-        original_query_vectors = query_vectors[0]
-        initial_results = await asyncio.gather(
-            *(
-                hybrid_search(self._client, query_vectors, limit=K, options=options)
-                for query_vectors in query_vectors
+    async def _candidates(self, query_vectors: QueryVectors, options: RetrievalOptions) -> list[Document]:
+        """Candidate chunks for one question: hybrid search, same-file chunks, graph neighbors."""
+        # La soglia di rilevanza vale solo qui: chunk dello stesso file e rerank finale
+        # servono a dare contesto e a ordinare, non a selezionare.
+        documents = await hybrid_search(
+            self._client, query_vectors, limit=K, options=options, min_score_ratio=SEMANTIC_RELEVANCE_RATIO
+        )
+        if options.use_same_file:
+            filenames = dict.fromkeys(document.metadata["filename"] for document in documents)
+            same_file = await asyncio.gather(
+                *(
+                    hybrid_search(
+                        self._client,
+                        query_vectors,
+                        limit=SAME_FILE_LIMIT,
+                        query_filter=Filter(
+                            must=[FieldCondition(key="metadata.filename", match=MatchValue(value=filename))]
+                        ),
+                        options=options,
+                    )
+                    for filename in filenames
+                )
             )
-        )
-        unique_documents = _keep_highest_scoring(
-            document for results in initial_results for document in results
-        )
-        final_documents: list[Document] = []
-        processed_files: set[str] = set()
-        for document in unique_documents:
-            filename = document.metadata.get("filename")
-            if not filename or not options.use_same_file:
-                final_documents.append(document)
-                continue
-            if filename in processed_files:
-                continue
+            documents = _keep_highest_scoring(chain(documents, *same_file))
+        if not options.use_symbol_graph:
+            return documents
 
-            processed_files.add(filename)
-            same_file_documents = await hybrid_search(
-                self._client,
-                original_query_vectors,
-                limit=4,
-                query_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="metadata.filename",
-                            match=MatchValue(value=filename),
-                        )
-                    ]
-                ),
-                options=options,
-            )
-            final_documents.extend(same_file_documents or [document])
-
-        ranked_documents = sorted(_keep_highest_scoring(final_documents), key=_document_sort_key)
-        graph_relations = (
-            self._symbol_graph.related_chunks(
-                {
-                    chunk_id
-                    for document in ranked_documents
-                    if (chunk_id := document.metadata.get("chunk_id"))
-                },
-                limit=SYMBOL_GRAPH_MAX_NEIGHBORS,
-            )
-            if options.use_symbol_graph
-            else {}
+        relations = self._symbol_graph.related_chunks(
+            {document.metadata["chunk_id"] for document in documents},
+            limit=SYMBOL_GRAPH_MAX_NEIGHBORS,
         )
-        graph_documents = await get_documents_by_chunk_ids(
-            self._client,
-            list(graph_relations),
-        )
+        graph_documents = await get_documents_by_chunk_ids(self._client, list(relations))
         for document in graph_documents:
-            document.metadata["_graph_relation"] = graph_relations[
-                document.metadata["chunk_id"]
-            ]
-        source_documents = list(ranked_documents)
-        source_documents.extend(graph_documents)
-        source_documents = _limit_context_documents(source_documents)
-        sources = [
-            {
-                "filename": document.metadata.get("filename"),
-                "service": document.metadata.get("service"),
-                "chunk_type": document.metadata.get("chunk_type"),
-                "symbol_name": document.metadata.get("symbol_name"),
-                "start_line": document.metadata.get("start_line"),
-                "end_line": document.metadata.get("end_line"),
-                "chunk_id": document.metadata.get("chunk_id"),
-                "score": document.metadata.get("_colbert_score"),
-                "graph_relation": document.metadata.get("_graph_relation"),
-                "content": document.page_content,
-            }
-            for document in source_documents
-            if document.metadata.get("filename")
-        ]
-        context_str = "\n\n---\n\n".join(document.page_content for document in source_documents)
-        return context_str, sources
+            document.metadata["_graph_relation"] = relations[document.metadata["chunk_id"]]
+        return [*documents, *graph_documents]
 
-    async def retrieve_context(self, question: str) -> str:
-        """Build a de-duplicated context ordered by descending ColBERT relevance."""
-        context, _ = await self.retrieve_with_sources(question)
-        return context
-
-    async def retrieve_many_with_sources(
+    async def retrieve(
         self,
         questions: list[str],
         original_question: str,
         options: RetrievalOptions = RetrievalOptions(),
-    ) -> tuple[str, list[dict]]:
-        """Merge planner contexts, rerank candidates, and apply one shared budget."""
+    ) -> list[dict]:
+        """Return the ranked sources for the original question and its planner sub-questions."""
+        original_question = sanitize_text(original_question).strip()
         retrieval_questions = [
             original_question,
             *(
@@ -189,56 +132,50 @@ class HybridRetriever:
                 for question in questions
                 if question.casefold() != original_question.casefold()
             ),
-        ][:4]
-        results = await asyncio.gather(
-            *(
-                self.retrieve_with_sources(question, options)
-                for question in retrieval_questions
-            )
-        )
-        sources_by_key: dict[tuple[str | None, str | None], dict] = {}
-        for _, sources in results:
-            for source in sources:
-                key = (source.get("filename"), source.get("chunk_id"))
-                sources_by_key.setdefault(key, source)
-        if not options.use_colbert:
-            sources = sorted(
-                sources_by_key.values(),
-                key=lambda source: -(source.get("score") or 0.0),
-            )
-            sources = _apply_context_budget(sources, lambda source: len(source["content"]))
-            return "\n\n---\n\n".join(source["content"] for source in sources), sources
-
-        candidate_chunk_ids = [
-            chunk_id
-            for source in sources_by_key.values()
-            if (chunk_id := source.get("chunk_id"))
         ]
-        original_vectors = await asyncio.to_thread(encode_queries, [original_question])
-        reranked_documents = await rerank_chunk_ids(
-            self._client,
-            original_vectors[0],
-            candidate_chunk_ids,
+        # Un solo passaggio BGE-M3 per tutte le domande; il primo vettore e' la domanda originale.
+        query_vectors = await asyncio.to_thread(encode_queries, retrieval_questions)
+        candidates = await asyncio.gather(
+            *(self._candidates(vectors, options) for vectors in query_vectors)
         )
-        rerank_scores = {
-            document.metadata["chunk_id"]: document.metadata["_colbert_score"]
-            for document in reranked_documents
-        }
-        sources = list(sources_by_key.values())
-        if rerank_scores:
-            sources = [
-                source
-                for source in sources
-                if source.get("chunk_id") in rerank_scores
-            ]
-            sources.sort(
-                key=lambda source: -float(rerank_scores.get(source.get("chunk_id"), -1.0)),
-            )
+        documents: dict[str, Document] = {}
+        neighbors: dict[str, Document] = {}
+        for document in chain.from_iterable(candidates):
+            target = neighbors if "_graph_relation" in document.metadata else documents
+            target.setdefault(document.metadata["chunk_id"], document)
+
+        if options.use_colbert:
+            # Gli score delle sotto-domande non sono confrontabili: rerank sulla domanda originale.
+            reranked = await rerank_chunk_ids(self._client, query_vectors[0], list(documents))
+            scores = {
+                document.metadata["chunk_id"]: document.metadata["_colbert_score"]
+                for document in reranked
+            }
         else:
-            sources = []
-        for source in sources:
-            final_score = rerank_scores[source["chunk_id"]]
-            source["score"] = final_score
-            source["final_score"] = final_score
-        sources = _apply_context_budget(sources, lambda source: len(source["content"]))
-        return "\n\n---\n\n".join(source["content"] for source in sources), sources
+            scores = {
+                chunk_id: document.metadata.get("_colbert_score")
+                for chunk_id, document in documents.items()
+            }
+        ranked = sorted(
+            (document for chunk_id, document in documents.items() if chunk_id in scores),
+            key=lambda document: -(scores[document.metadata["chunk_id"]] or 0.0),
+        )
+        # I vicini del grafo servono proprio quando non somigliano alla domanda: saltano il
+        # rerank e hanno una quota riservata per ogni domanda, proporzionale ai loro posti
+        # e mai oltre meta' del budget.
+        max_neighbors = SYMBOL_GRAPH_MAX_NEIGHBORS * len(retrieval_questions)
+        graph_share = min(max_neighbors / RAG_CONTEXT_MAX_SOURCES, 0.5)
+        graph_documents = _apply_context_budget(
+            (document for chunk_id, document in neighbors.items() if chunk_id not in documents),
+            max_neighbors,
+            int(RAG_CONTEXT_MAX_CHARS * graph_share),
+        )
+        ranked_documents = _apply_context_budget(
+            ranked,
+            RAG_CONTEXT_MAX_SOURCES - len(graph_documents),
+            RAG_CONTEXT_MAX_CHARS - sum(len(document.page_content) for document in graph_documents),
+        )
+        return [
+            *(_to_source(document, scores[document.metadata["chunk_id"]]) for document in ranked_documents),
+            *(_to_source(document, None) for document in graph_documents),
+        ]

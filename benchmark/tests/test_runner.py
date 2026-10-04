@@ -99,3 +99,23 @@ def test_failed_run_records_error_in_status(monkeypatch):
     execute_run("failing-run", RunSpec(dataset="requests"), client=FakeClient())
     status = json.loads((runner.RESULTS_DIR / "failing-run" / "status.json").read_text())
     assert status["status"] == "error" and "git non raggiungibile" in status["error"]
+
+
+def test_failed_answers_are_not_judged(stubbed, monkeypatch):
+    class FailingClient(FakeClient):
+        def ask(self, question, use_planner, options):
+            return {**super().ask(question, use_planner, options), "answer": "", "error": "[ERROR] timeout"}
+
+    monkeypatch.setattr(judge, "judge_abstains", lambda *a, **kw: pytest.fail("risposta fallita giudicata"))
+    spec = RunSpec(
+        dataset="requests", limit=2, stages=["generation", "latency"], generation_configs=["full"],
+        latency_questions=2, latency_repeats=1, latency_warmups=0,
+    )
+    execute_run("failing-answers", spec, client=FailingClient())
+
+    run_dir = runner.RESULTS_DIR / "failing-answers"
+    generation = [json.loads(line) for line in (run_dir / "generation.jsonl").read_text().splitlines()]
+    assert all(row["metrics"] == {"answer_error": 1.0} for row in generation)
+    latency = [json.loads(line) for line in (run_dir / "latency.jsonl").read_text().splitlines()]
+    assert all("metrics" not in row for row in latency)
+    assert "2 richieste fallite su 2" in (run_dir / "report.md").read_text()

@@ -24,7 +24,6 @@ class AppConfig(BaseModel):
     embedding_max_length: int = Field(ge=128, le=8192)
     max_message_length: int = Field(ge=100, le=50000)
     min_message_length: int = Field(ge=1, le=100)
-    model_load_timeout: float = Field(ge=10.0)
     qdrant_query_timeout: float = Field(ge=5.0)
     llm_inference_timeout: float = Field(ge=10.0)
     base_dir: Path
@@ -38,15 +37,18 @@ class AppConfig(BaseModel):
     symbol_graph_pagerank_damping: float = Field(default=0.4, gt=0.0, lt=1.0)
     symbol_graph_pagerank_iterations: int = Field(default=20, ge=1)
     symbol_graph_pagerank_tolerance: float = Field(default=1e-6, gt=0.0)
-    rag_context_max_chars: int = Field(default=60_000, ge=1)
+    # Finestra del modello (num_ctx di Ollama): da qui deriva il budget del contesto RAG.
+    llm_context_tokens: int = Field(default=20_000, ge=2_000)
     rag_context_max_sources: int = Field(default=35, ge=1)
     index_chunk_size: int = Field(default=1200, ge=1)
     index_chunk_overlap: int = Field(default=150, ge=0)
     supported_extensions: frozenset[str]
     skip_dirs: frozenset[str]
-    index_target_paths: tuple[str, ...]
+    max_upload_mb: int = Field(default=200, ge=1)
+    max_extracted_mb: int = Field(default=1000, ge=1)
+    ingestion_workspace_dir: Path = Path("/app/workspace")
 
-    @field_validator("supported_extensions", "skip_dirs", "index_target_paths", mode="before")
+    @field_validator("supported_extensions", "skip_dirs", mode="before")
     @classmethod
     def parse_csv(cls, value: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
         if isinstance(value, str):
@@ -76,7 +78,6 @@ SEMANTIC_RELEVANCE_RATIO = config.semantic_relevance_ratio
 EMBEDDING_MAX_LENGTH = config.embedding_max_length
 MAX_MESSAGE_LENGTH = config.max_message_length
 MIN_MESSAGE_LENGTH = config.min_message_length
-MODEL_LOAD_TIMEOUT = config.model_load_timeout
 QDRANT_QUERY_TIMEOUT = config.qdrant_query_timeout
 LLM_INFERENCE_TIMEOUT = config.llm_inference_timeout
 
@@ -91,13 +92,27 @@ SYMBOL_GRAPH_MAX_DEPTH = config.symbol_graph_max_depth
 SYMBOL_GRAPH_PAGERANK_DAMPING = config.symbol_graph_pagerank_damping
 SYMBOL_GRAPH_PAGERANK_ITERATIONS = config.symbol_graph_pagerank_iterations
 SYMBOL_GRAPH_PAGERANK_TOLERANCE = config.symbol_graph_pagerank_tolerance
-RAG_CONTEXT_MAX_CHARS = config.rag_context_max_chars
+LLM_CONTEXT_TOKENS = config.llm_context_tokens
+# Due terzi della finestra al contesto (~3 caratteri per token di codice), il resto a
+# istruzioni e risposta: oltre la finestra Ollama tronca l'inizio del prompt.
+RAG_CONTEXT_MAX_CHARS = LLM_CONTEXT_TOKENS * 2 // 3 * 3
+# Mappa del repository (README, file e simboli) inserita in ogni prompt prima del contesto.
+REPO_MAP_MAX_CHARS = RAG_CONTEXT_MAX_CHARS * 15 // 100
 RAG_CONTEXT_MAX_SOURCES = config.rag_context_max_sources
 INDEX_CHUNK_SIZE = config.index_chunk_size
 INDEX_CHUNK_OVERLAP = config.index_chunk_overlap
 INDEX_STATE_FILE = INDEX_STATE_DIR / "index_state.json"
 INDEX_COMPLETE_FILE = INDEX_STATE_DIR / "index_complete"
+SYMBOL_GRAPH_FILE = INDEX_STATE_DIR / "symbol_graph.json"
+REPO_MAP_FILE = INDEX_STATE_DIR / "repo_map.txt"
 
 SUPPORTED_EXTENSIONS = config.supported_extensions
 SKIP_DIRS = config.skip_dirs
-INDEX_TARGET_PATHS = config.index_target_paths
+MAX_UPLOAD_MB = config.max_upload_mb
+MAX_EXTRACTED_MB = config.max_extracted_mb
+INGESTION_WORKSPACE_DIR = config.ingestion_workspace_dir
+
+DENSE_DIMENSION = 1024
+SYMBOL_GRAPH_VERSION = 1
+# Da incrementare quando cambia il chunking: invalida gli indici gia' costruiti.
+CHUNKING_VERSION = 2

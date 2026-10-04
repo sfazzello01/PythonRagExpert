@@ -15,6 +15,7 @@ class RetrievalOptions(BaseModel):
     use_colbert: bool = True
     use_same_file: bool = True
     use_symbol_graph: bool = True
+    use_repo_map: bool = True
 
     @model_validator(mode="after")
     def _require_a_first_stage(self) -> "RetrievalOptions":

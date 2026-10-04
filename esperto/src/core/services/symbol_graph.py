@@ -7,7 +7,7 @@ import logging
 from collections import defaultdict, deque
 from pathlib import Path
 
-from ..shared.settings import (
+from config import (
     SYMBOL_GRAPH_FILE,
     SYMBOL_GRAPH_MAX_DEPTH,
     SYMBOL_GRAPH_PAGERANK_DAMPING,
@@ -61,9 +61,15 @@ class SymbolGraph:
             if previous is None or score > previous[0]:
                 best_by_chunk[chunk_id] = (score, relation)
 
+        # A parita' di score (es. i chiamanti, che il PPR diretto non raggiunge)
+        # vince il percorso piu' corto dai seed.
         ordered = sorted(
             best_by_chunk,
-            key=lambda chunk_id: (-best_by_chunk[chunk_id][0], chunk_id),
+            key=lambda chunk_id: (
+                -best_by_chunk[chunk_id][0],
+                best_by_chunk[chunk_id][1].count("->"),
+                chunk_id,
+            ),
         )
         return {chunk_id: best_by_chunk[chunk_id][1] for chunk_id in ordered[:limit]}
 
@@ -119,15 +125,11 @@ class SymbolGraph:
                         next_ranks[target] += share
                 else:
                     dangling_mass += damping * ranks[node_id]
-            delta = 0.0
-            for node_id in nodes:
-                if node_id in seed_symbols:
-                    next_ranks[node_id] += (
-                        (1.0 - damping) + dangling_mass
-                    ) * personalization
-                else:
-                    next_ranks[node_id] += dangling_mass * personalization
-                delta += abs(next_ranks[node_id] - ranks[node_id])
+            # Teleport e massa dei nodi senza archi uscenti tornano ai soli seed:
+            # la massa totale resta 1.
+            for node_id in seed_symbols:
+                next_ranks[node_id] += ((1.0 - damping) + dangling_mass) * personalization
+            delta = sum(abs(next_ranks[node_id] - ranks[node_id]) for node_id in nodes)
             ranks = next_ranks
             if delta < SYMBOL_GRAPH_PAGERANK_TOLERANCE:
                 break

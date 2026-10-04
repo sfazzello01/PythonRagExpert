@@ -13,9 +13,9 @@ via Ollama, ingestion di archivi ZIP.
 | `src/core/indexing/` | Discovery sorgenti, chunking AST Python, symbol graph, pipeline di upsert |
 | `src/core/rag/` | Planner (sotto-domande), retrieval ibrido, prompt, chain di streaming |
 | `src/core/services/` | BGE-M3 embeddings, client Qdrant, stato indice, symbol graph |
-| `src/core/shared/` | Settings validati, utility testo/vettori |
+| `src/core/shared/` | Opzioni di retrieval, utility testo/vettori |
 
-Pipeline di retrieval: query expansion → hybrid search (dense+sparse prefetch,
+Pipeline di retrieval: planner (sotto-domande) → hybrid search (dense+sparse prefetch,
 rerank ColBERT MaxSim) → dedup per `chunk_id` → espansione via symbol graph
 → budget di contesto condiviso (max sorgenti / max caratteri).
 
@@ -36,7 +36,7 @@ pubblica considerare:
 
 - **Nessuna autenticazione** sugli endpoint `/ask` e `/upload`: chiunque
   raggiunga le porte può interrogare il modello o avviare re-indicizzazioni.
-- **Porte esposte sull'host** (3306 MariaDB, 6333 Qdrant, 11434 Ollama):
+- **Porte esposte sull'host** (6333 Qdrant, 11434 Ollama):
   comode in sviluppo, da chiudere o vincolare in produzione.
 - **Upload ZIP**: la validazione copre magic bytes, checksum, path traversal,
   estensioni e dimensione massima, ma non c'è scansione antivirus né quota

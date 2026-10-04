@@ -109,3 +109,19 @@ def test_seed_without_neighbors_returns_empty(tmp_path):
 def test_unknown_seed_chunk_returns_empty(tmp_path):
     graph_path = _write_graph(tmp_path, [("m::seed", "m::a")])
     assert SymbolGraph(graph_path).related_chunks({"chunk_unknown"}, 6) == {}
+
+
+def test_pagerank_conserves_mass(tmp_path):
+    edges = [("m::seed", f"m::t{index}") for index in range(50)]
+    graph = SymbolGraph(_write_graph(tmp_path, edges))
+    graph._reload_if_needed()
+    seeds = {"m::seed"}
+    ranks = graph._personalized_pagerank(seeds, set(graph._bfs_relation_paths(seeds)))
+    assert abs(sum(ranks.values()) - 1.0) < 1e-9
+
+
+def test_equal_scores_prefer_the_shortest_path(tmp_path):
+    # Il PPR diretto non raggiunge i chiamanti: tra a (2 hop) e z (1 hop) vince z.
+    graph_path = _write_graph(tmp_path, [("m::a", "m::z"), ("m::z", "m::seed")])
+    related = SymbolGraph(graph_path).related_chunks({"chunk_seed"}, limit=6)
+    assert list(related) == ["chunk_z", "chunk_a"]

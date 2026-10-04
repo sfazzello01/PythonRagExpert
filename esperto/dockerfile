@@ -24,11 +24,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiamo il resto del codice dell'applicazione
 COPY . .
 
-RUN chmod +x /app/entrypoint.sh
-
 # Esponiamo la porta per FastAPI
 EXPOSE 5000
 
-ENTRYPOINT ["/app/entrypoint.sh"]
 # Comando per avviare l'applicazione con Uvicorn
 CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "5000"]

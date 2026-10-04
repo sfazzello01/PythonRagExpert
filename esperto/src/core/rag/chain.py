@@ -8,7 +8,7 @@ from pathlib import Path
 
 from langchain_ollama import ChatOllama  # type: ignore
 
-from config import LLM_MODEL, OLLAMA_URL, TEMPERATURE
+from config import LLM_CONTEXT_TOKENS, LLM_MODEL, OLLAMA_URL, REPO_MAP_FILE, TEMPERATURE
 
 from .prompts import build_prompt
 from .planner import plan_subquestions
@@ -33,6 +33,7 @@ def _create_response_llm(use_reasoning: bool) -> ChatOllama:
         base_url=OLLAMA_URL,
         temperature=TEMPERATURE,
         reasoning=use_reasoning,
+        num_ctx=LLM_CONTEXT_TOKENS,
     )
 
 
@@ -41,7 +42,16 @@ _planner_llm = ChatOllama(
     base_url=OLLAMA_URL,
     temperature=0.0,  # output deterministico per il planner
     reasoning=False,
+    num_ctx=LLM_CONTEXT_TOKENS,  # stessa finestra della risposta: Ollama non ricarica il modello
 )
+
+
+def _repo_map() -> str:
+    """Repository overview written by the last indexing run (empty if not available)."""
+    try:
+        return REPO_MAP_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def _save_last_prompt(prompt_value) -> None:
@@ -70,17 +80,14 @@ async def retrieve_only(
     question: str,
     use_planner: bool = True,
     options: RetrievalOptions = RetrievalOptions(),
-) -> tuple[str, list[str], list[dict]]:
-    """Run planner + retrieval without generation; returns (context, subquestions, sources)."""
+) -> tuple[list[str], list[dict]]:
+    """Run planner + retrieval without generation; returns (subquestions, sources)."""
     subquestions = (
-        await plan_subquestions(question, _planner_llm)
+        await plan_subquestions(question, _planner_llm, _repo_map() if options.use_repo_map else "")
         if use_planner
         else [question]
     )
-    context, sources = await _get_retriever().retrieve_many_with_sources(
-        subquestions, question, options
-    )
-    return context, subquestions, sources
+    return subquestions, await _get_retriever().retrieve(subquestions, question, options)
 
 
 async def stream_expert_response(
@@ -90,12 +97,22 @@ async def stream_expert_response(
     options: RetrievalOptions = RetrievalOptions(),
 ):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
-    context, subquestions, sources = await retrieve_only(question, use_planner, options)
+    subquestions, sources = await retrieve_only(question, use_planner, options)
+    context = "\n\n---\n\n".join(source["content"] for source in sources)
+    repo_map = _repo_map() if options.use_repo_map else ""
     yield json.dumps(
-        {"type": "sources", "data": {"sources": sources, "subquestions": subquestions}},
+        {"type": "sources", "data": {"sources": sources, "subquestions": subquestions, "repo_map": repo_map}},
         ensure_ascii=False,
     ) + "\n"
-    prompt_value = build_prompt().invoke({"context": context, "question": question})
+    repo_map_section = (
+        "MAPPA DEL REPOSITORY (per orientarsi e per le domande generali; "
+        f"i dettagli vanno presi dal codice recuperato):\n{repo_map}\n\n"
+        if repo_map
+        else ""
+    )
+    prompt_value = build_prompt().invoke(
+        {"repo_map": repo_map_section, "context": context, "question": question}
+    )
     _save_last_prompt(prompt_value)
     async for chunk in _create_response_llm(use_reasoning).astream(prompt_value):
         reasoning = chunk.additional_kwargs.get("reasoning_content", "")

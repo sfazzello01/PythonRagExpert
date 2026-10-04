@@ -8,11 +8,19 @@ import time
 from langchain_core.documents import Document
 
 from ..services.embedding import encode_documents, load_indexing_model
-from ..services.index_state import clear, is_current, save, source_fingerprint
-from ..services.qdrant import ensure_hybrid_collection, upsert_encoded_documents, wait_for_qdrant
-from ..shared.settings import BATCH_SIZE, QDRANT_COLLECTION
+from ..services.index_state import is_current, save, source_fingerprint
+from ..services.qdrant import (
+    activate_collection,
+    create_hybrid_collection,
+    has_active_collection,
+    upsert_encoded_documents,
+    wait_for_qdrant,
+)
+from config import BATCH_SIZE, INDEX_COMPLETE_FILE, QDRANT_COLLECTION
+
 from .chunking import PythonASTContextualChunker, fallback_text_split
 from .discovery import iter_source_files
+from .repo_map import save_repo_map
 from .symbol_graph import save_symbol_graph
 
 logger = logging.getLogger("EspertoIndexing")
@@ -43,24 +51,23 @@ def build_index() -> None:
     logger.info("Scansione completata: %d file validi.", len(source_files))
     fingerprint = source_fingerprint(source_files)
 
-    if client.collection_exists(QDRANT_COLLECTION) and is_current(fingerprint):
-        from ..shared.settings import INDEX_COMPLETE_FILE
-
+    if has_active_collection(client) and is_current(fingerprint):
         INDEX_COMPLETE_FILE.touch()
         logger.info("Codebase invariata: indicizzazione saltata.")
         return
 
-    clear()
-    ensure_hybrid_collection(client, recreate=client.collection_exists(QDRANT_COLLECTION))
+    # Il nuovo indice nasce in una collection a parte: quello attivo resta servito
+    # (con il suo symbol graph e il suo stato) finche' la costruzione non e' completa.
+    collection = f"{QDRANT_COLLECTION}_{int(start_time)}"
+    create_hybrid_collection(client, collection)
     model = load_indexing_model()
     documents = _chunk_sources(source_files)
-    save_symbol_graph(source_files)
     logger.info("Avvio indicizzazione ibrida di %d chunk semantici.", len(documents))
 
     for start in range(0, len(documents), BATCH_SIZE):
         batch = documents[start : start + BATCH_SIZE]
         batch_start_time = time.time()
-        upsert_encoded_documents(client, batch, encode_documents(model, batch))
+        upsert_encoded_documents(client, collection, batch, encode_documents(model, batch))
         logger.info(
             "Indicizzati %d/%d chunk in %.1fs.",
             min(start + BATCH_SIZE, len(documents)),
@@ -68,5 +75,13 @@ def build_index() -> None:
             time.time() - batch_start_time,
         )
 
+    activate_collection(client, collection)
+    save_symbol_graph(source_files)
+    save_repo_map(documents, source_files)
     save(fingerprint, len(source_files))
     logger.info("Indicizzazione completata in %.2fs.", time.time() - start_time)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    build_index()

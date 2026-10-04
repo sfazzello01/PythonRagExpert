@@ -6,16 +6,7 @@ import io
 import os
 import zipfile
 
-# Estensioni ammesse: ricavate da env SUPPORTED_EXTENSIONS (stessa lista usata
-# dalla pipeline di indicizzazione), con fallback alla lista storica del progetto.
-_DEFAULT_EXTENSIONS = ".py,.yaml,.yml,.md,.txt,.html,.json,.js"
-
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))
-SUPPORTED_EXTENSIONS = frozenset(
-    ext.strip()
-    for ext in os.getenv("SUPPORTED_EXTENSIONS", _DEFAULT_EXTENSIONS).split(",")
-    if ext.strip()
-)
+from config import MAX_EXTRACTED_MB, MAX_UPLOAD_MB, SUPPORTED_EXTENSIONS
 
 
 class ZipValidationError(ValueError):
@@ -58,6 +49,11 @@ def validate_zip(content: bytes, filename: str) -> list[str]:
         raise ZipValidationError(f"Archivio ZIP corrotto: {e}") from e
 
     with archive:
+        # Prima di testzip(), che decomprime l'intero archivio (zip bomb).
+        if sum(info.file_size for info in archive.infolist()) > MAX_EXTRACTED_MB * 1024 * 1024:
+            raise ZipValidationError(
+                f"Archivio troppo grande una volta estratto (massimo {MAX_EXTRACTED_MB} MB)"
+            )
         if archive.testzip() is not None:
             raise ZipValidationError("Archivio ZIP corrotto: checksum non valido")
 

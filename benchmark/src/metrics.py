@@ -58,7 +58,8 @@ def _level_metrics(prefix: str, ranked: list[str], relevant: set[str]) -> dict[s
 def retrieval_metrics(sources: list[dict], relevant: list[dict]) -> dict[str, Optional[float]]:
     """Metriche file e simbolo per una domanda con gold; `relevant` = [{file, symbol, hop}]."""
     ranked_files = unique_in_order(s["filename"] for s in sources)
-    ranked_symbols = unique_in_order(f"{s['filename']}::{s['symbol_name']}" for s in sources)
+    # Il gold e' top-level: un chunk di metodo (`Classe.metodo`) conta per la sua classe.
+    ranked_symbols = unique_in_order(f"{s['filename']}::{s['symbol_name'].split('.')[0]}" for s in sources)
     gold_files = {r["file"] for r in relevant}
     gold_symbols = {f"{r['file']}::{r['symbol']}" for r in relevant}
     metrics: dict[str, Optional[float]] = {}
@@ -68,7 +69,9 @@ def retrieval_metrics(sources: list[dict], relevant: list[dict]) -> dict[str, Op
     metrics["hop2_symbol_recall"] = (
         len(hop2.intersection(ranked_symbols)) / len(hop2) if hop2 else None
     )
+    # Dimensione del contesto: le configurazioni ne restituiscono di diverse, e il recall va letto insieme.
     metrics["n_sources"] = float(len(sources))
+    metrics["context_chars"] = float(sum(len(s.get("content", "")) for s in sources))
     return metrics
 
 

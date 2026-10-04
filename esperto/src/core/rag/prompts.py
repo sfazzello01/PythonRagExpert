@@ -8,6 +8,7 @@ from langchain_core.prompts import (
 # Singolo messaggio utente: alcuni modelli Ollama gestiscono male i SystemMessage
 # separati e restituiscono risposte vuote. Il contesto va prima delle istruzioni.
 INSTRUCTION = (
+    "{repo_map}"
     "CONTESTO RECUPERATO DALLA CODEBASE:\n"
     "{context}\n\n"
     "ISTRUZIONI:\n"

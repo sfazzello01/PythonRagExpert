@@ -12,13 +12,19 @@ logger = logging.getLogger("EspertoPlanner")
 
 _PLANNER_PROMPT = """Sei un planner per il retrieval di una codebase.
 Genera sotto-domande solo se migliorano chiaramente il retrieval.
-Non introdurre ipotesi, nomi di file, simboli o tecnologie non presenti nella domanda.
+{grounding}
 Ogni sotto-domanda deve essere rispondibile cercando nella codebase.
-Genera da due a quattro sotto-domande a seconda della complessità della domanda originale.
-Mantieni una sola domanda se e gia specifica. Non rispondere alla domanda.
+Se la domanda è già specifica restituisci solo la domanda stessa; altrimenti genera
+da due a quattro sotto-domande a seconda della sua complessità. Non rispondere alla domanda.
 Restituisci esclusivamente JSON valido: {{"subquestions":["..."]}}.
 
-DOMANDA: {question}"""
+{repo_map}DOMANDA: {question}"""
+
+_BLIND_GROUNDING = "Non introdurre ipotesi, nomi di file, simboli o tecnologie non presenti nella domanda."
+_MAP_GROUNDING = (
+    "Usa la mappa del repository per ancorare le sotto-domande a file e simboli reali e pertinenti.\n"
+    "Non introdurre ipotesi, nomi di file, simboli o tecnologie non presenti nella domanda o nella mappa."
+)
 
 
 def parse_subquestions(content: str, original_question: str) -> list[str]:
@@ -50,10 +56,15 @@ def parse_subquestions(content: str, original_question: str) -> list[str]:
     return questions or ([cleaned_original] if cleaned_original else [])
 
 
-async def plan_subquestions(question: str, llm: Any) -> list[str]:
-    """Ask the local LLM for a small retrieval plan without blocking generation."""
+async def plan_subquestions(question: str, llm: Any, repo_map: str = "") -> list[str]:
+    """Ask the local LLM for a small retrieval plan, grounded on the repository map when given."""
+    prompt = _PLANNER_PROMPT.format(
+        grounding=_MAP_GROUNDING if repo_map else _BLIND_GROUNDING,
+        repo_map=f"MAPPA DEL REPOSITORY:\n{repo_map}\n\n" if repo_map else "",
+        question=question,
+    )
     try:
-        response = await llm.ainvoke(_PLANNER_PROMPT.format(question=question))
+        response = await llm.ainvoke(prompt)
         content = response.content if isinstance(response.content, str) else ""
     except Exception as error:
         logger.warning("Planner failed; using original question: %s", error)

@@ -12,6 +12,10 @@ from langchain_core.documents import Document
 from qdrant_client import AsyncQdrantClient, QdrantClient  # type: ignore
 from qdrant_client.http.exceptions import UnexpectedResponse  # type: ignore
 from qdrant_client.http.models import (  # type: ignore
+    CreateAlias,
+    CreateAliasOperation,
+    DeleteAlias,
+    DeleteAliasOperation,
     Distance,
     Filter,
     Fusion,
@@ -31,22 +35,18 @@ from qdrant_client.http.models import (  # type: ignore
     VectorParams,
 )
 
-from ..shared.settings import (
+from config import (
     DENSE_DIMENSION,
     PREFETCH_LIMIT,
     QDRANT_COLLECTION,
     QDRANT_HOST,
     QDRANT_PORT,
     QDRANT_QUERY_TIMEOUT,
-    SEMANTIC_RELEVANCE_RATIO,
 )
 from ..shared.options import RetrievalOptions
 from ..shared.vectors import QueryVectors, lexical_weights_to_sparse_vector
 
 logger = logging.getLogger("EspertoQdrant")
-
-# Candidati della fusione dense+sparse riordinati dal reranker ColBERT.
-RERANK_CANDIDATE_LIMIT = 75
 
 # Con scalar quantization attiva, rescore sui vettori originali per la qualita'.
 _QUANTIZATION_PARAMS = SearchParams(
@@ -71,15 +71,11 @@ async def get_documents_by_chunk_ids(
     """Retrieve indexed source chunks by their stable application-level IDs."""
     if not chunk_ids:
         return []
-    try:
-        records = await client.retrieve(
-            collection_name=QDRANT_COLLECTION,
-            ids=[_point_id(chunk_id) for chunk_id in chunk_ids],
-            with_payload=True,
-        )
-    except Exception as error:
-        logger.error("Graph chunk retrieval failed: %s: %s", type(error).__name__, error)
-        return []
+    records = await client.retrieve(
+        collection_name=QDRANT_COLLECTION,
+        ids=[_point_id(chunk_id) for chunk_id in chunk_ids],
+        with_payload=True,
+    )
     documents_by_chunk_id = {
         payload.get("metadata", {}).get("chunk_id"): Document(
             page_content=payload.get("page_content", ""),
@@ -109,15 +105,36 @@ def wait_for_qdrant() -> QdrantClient:
     raise RuntimeError("Qdrant non disponibile dopo 60 secondi.")
 
 
-def ensure_hybrid_collection(client: QdrantClient, recreate: bool = False) -> None:
-    """Create the dense+sparse+ColBERT collection, replacing it when requested."""
-    if client.collection_exists(QDRANT_COLLECTION):
-        if not recreate:
-            return
-        client.delete_collection(QDRANT_COLLECTION)
+def has_active_collection(client: QdrantClient) -> bool:
+    """Return whether the QDRANT_COLLECTION alias points to a built index."""
+    return any(alias.alias_name == QDRANT_COLLECTION for alias in client.get_aliases().aliases)
 
+
+def activate_collection(client: QdrantClient, collection: str) -> None:
+    """Atomically point the QDRANT_COLLECTION alias to a new index and drop the previous ones.
+
+    Le query usano sempre l'alias: fino allo scambio continuano a vedere l'indice precedente.
+    """
+    names = [description.name for description in client.get_collections().collections]
+    if QDRANT_COLLECTION in names:  # indice creato prima degli alias: il nome va liberato
+        client.delete_collection(QDRANT_COLLECTION)
+    operations = [
+        CreateAliasOperation(
+            create_alias=CreateAlias(collection_name=collection, alias_name=QDRANT_COLLECTION)
+        )
+    ]
+    if has_active_collection(client):
+        operations.insert(0, DeleteAliasOperation(delete_alias=DeleteAlias(alias_name=QDRANT_COLLECTION)))
+    client.update_collection_aliases(change_aliases_operations=operations)
+    for name in names:
+        if name.startswith(f"{QDRANT_COLLECTION}_") and name != collection:
+            client.delete_collection(name)
+
+
+def create_hybrid_collection(client: QdrantClient, collection: str) -> None:
+    """Create a dense+sparse+ColBERT collection."""
     client.create_collection(
-        collection_name=QDRANT_COLLECTION,
+        collection_name=collection,
         vectors_config={
             "dense": VectorParams(
                 size=DENSE_DIMENSION,
@@ -158,6 +175,7 @@ def _point_id(chunk_id: str) -> str:
 
 def upsert_encoded_documents(
     client: QdrantClient,
+    collection: str,
     documents: Sequence[Document],
     encoded_batch: dict,
 ) -> None:
@@ -180,38 +198,34 @@ def upsert_encoded_documents(
         )
     ]
     try:
-        client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+        client.upsert(collection_name=collection, points=points)
     except UnexpectedResponse as error:
         if "larger than allowed" not in str(error) or len(points) == 1:
             raise
         logger.warning("Payload troppo grande; eseguo l'upsert dei %d chunk singolarmente.", len(points))
         for point in points:
-            client.upsert(collection_name=QDRANT_COLLECTION, points=[point])
+            client.upsert(collection_name=collection, points=[point])
 
 
 async def _query_colbert(client: AsyncQdrantClient, **kwargs) -> list[Document]:
-    """Run a ColBERT query_points call with the shared timeout/error handling."""
-    try:
-        response = await asyncio.wait_for(
-            client.query_points(
-                collection_name=QDRANT_COLLECTION,
-                using="colbert",
-                search_params=_QUANTIZATION_PARAMS,
-                **kwargs,
-            ),
-            timeout=QDRANT_QUERY_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        logger.error("Qdrant query timeout after %ss", QDRANT_QUERY_TIMEOUT)
-        return []
-    except Exception as error:
-        logger.error("Qdrant query failed: %s: %s", type(error).__name__, error)
-        return []
+    """Run a ColBERT query_points call with the shared timeout.
+
+    Timeout ed errori di Qdrant si propagano: un contesto vuoto sarebbe
+    indistinguibile da "nessun risultato".
+    """
+    response = await asyncio.wait_for(
+        client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            using="colbert",
+            search_params=_QUANTIZATION_PARAMS,
+            **kwargs,
+        ),
+        timeout=QDRANT_QUERY_TIMEOUT,
+    )
 
     if not response.points:
         return []
 
-    relevance_threshold = max(point.score for point in response.points) * SEMANTIC_RELEVANCE_RATIO
     return [
         Document(
             page_content=point.payload.get("page_content", ""),
@@ -221,7 +235,6 @@ async def _query_colbert(client: AsyncQdrantClient, **kwargs) -> list[Document]:
             },
         )
         for point in response.points
-        if point.score >= relevance_threshold
     ]
 
 
@@ -231,32 +244,30 @@ async def hybrid_search(
     limit: int,
     query_filter: Optional[Filter] = None,
     options: RetrievalOptions = RetrievalOptions(),
+    min_score_ratio: float = 0.0,
 ) -> list[Document]:
-    """Fusione dense+sparse (RRF) seguita da reranking ColBERT sui soli candidati."""
+    """Fusione dense+sparse (RRF) seguita da reranking ColBERT sui soli candidati.
+
+    Con `min_score_ratio` il rerank scarta i chunk sotto quella quota dello score migliore.
+    """
     prefetch = []
     if options.use_dense:
         prefetch.append(Prefetch(query=query_vectors.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter))
     if options.use_sparse:
         prefetch.append(Prefetch(query=query_vectors.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter))
-    try:
-        response = await asyncio.wait_for(
-            client.query_points(
-                collection_name=QDRANT_COLLECTION,
-                prefetch=prefetch,
-                query=FusionQuery(fusion=Fusion.RRF),
-                limit=RERANK_CANDIDATE_LIMIT if options.use_colbert else limit,
-                query_filter=query_filter,
-                search_params=_QUANTIZATION_PARAMS,
-                with_payload=not options.use_colbert,
-            ),
-            timeout=QDRANT_QUERY_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        logger.error("Qdrant fusion query timeout after %ss", QDRANT_QUERY_TIMEOUT)
-        return []
-    except Exception as error:
-        logger.error("Qdrant fusion query failed: %s: %s", type(error).__name__, error)
-        return []
+    response = await asyncio.wait_for(
+        client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            prefetch=prefetch,
+            query=FusionQuery(fusion=Fusion.RRF),
+            # Con ColBERT il rerank riceve tutti i candidati dei prefetch.
+            limit=len(prefetch) * PREFETCH_LIMIT if options.use_colbert else limit,
+            query_filter=query_filter,
+            search_params=_QUANTIZATION_PARAMS,
+            with_payload=not options.use_colbert,
+        ),
+        timeout=QDRANT_QUERY_TIMEOUT,
+    )
 
     if not response.points:
         return []
@@ -272,13 +283,16 @@ async def hybrid_search(
         ]
 
     # I candidati rispettano gia' query_filter: il rerank li riordina per ID.
-    return await _query_colbert(
+    documents = await _query_colbert(
         client,
         query=query_vectors.colbert,
         limit=limit,
         query_filter=Filter(must=[HasIdCondition(has_id=[point.id for point in response.points])]),
         with_payload=True,
     )
+    best_score = max((document.metadata["_colbert_score"] for document in documents), default=0.0)
+    threshold = best_score * min_score_ratio
+    return [document for document in documents if document.metadata["_colbert_score"] >= threshold]
 
 
 async def rerank_chunk_ids(

@@ -14,7 +14,7 @@ from typing import List, Optional
 import httpx
 from pydantic import BaseModel
 
-from config import DATASETS_DIR, JUDGE_MODEL, MANIFEST_ENV_KEYS, RESULTS_DIR
+from config import DATASETS_DIR, JUDGE_MODEL, LLM_MODEL, MANIFEST_ENV_KEYS, RESULTS_DIR
 
 from . import judge, ollama, report
 from .dataset import (
@@ -40,9 +40,10 @@ CONFIGS: dict[str, tuple[bool, dict]] = {
     "no_colbert": (True, {"use_colbert": False}),
     "dense_only": (True, {"use_sparse": False}),
     "sparse_only": (True, {"use_dense": False}),
+    "no_repo_map": (True, {"use_repo_map": False}),  # la mappa guida il planner e apre il prompt
     "naive": (
         False,
-        {"use_sparse": False, "use_colbert": False, "use_same_file": False, "use_symbol_graph": False},
+        {"use_sparse": False, "use_colbert": False, "use_same_file": False, "use_symbol_graph": False, "use_repo_map": False},
     ),
 }
 CLOSED_BOOK = "closed_book"  # LLM senza contesto: misura quanto il modello conosce gia' il repo
@@ -159,7 +160,7 @@ def _generate(client: EspertoClient, dataset: Dataset, question: Question, name:
     """Risposta + contesto per una configurazione (closed_book: nessun contesto)."""
     if name == CLOSED_BOOK:
         prompt = f"Rispondi in italiano a questa domanda sul progetto Python '{dataset.name}':\n{question.question}"
-        return {"answer": ollama.chat(prompt), "sources": []}
+        return {"answer": ollama.chat(prompt, model=LLM_MODEL), "sources": []}
     use_planner, options = CONFIGS[name]
     return client.ask(question.question, use_planner, options)
 
@@ -175,14 +176,19 @@ def _generation_stage(
             try:
                 result = _generate(client, dataset, question, name)
                 answer, sources = result["answer"], result["sources"]
-                context = "\n\n---\n\n".join(source["content"] for source in sources)
+                # La mappa del repository e' nel prompt: il giudice di fedelta' deve vederla.
+                context = "\n\n---\n\n".join(
+                    filter(None, [result.get("repo_map"), *(source["content"] for source in sources)])
+                )
                 row.update(answer=answer, sources=_compact(sources), error=result.get("error"))
+                if row["error"]:  # stream interrotto: una risposta parziale non va giudicata
+                    raise ValueError(row["error"])
                 judged = _judge_answer(question, answer, context, has_context=name != CLOSED_BOOK)
                 row.update(fact_verdicts=judged["fact_verdicts"], abstains=judged["abstains"])
                 citations = citation_stats(answer, repo_files, [s["filename"] for s in sources])
                 if name == CLOSED_BOOK:
                     citations["citation_in_context"] = None
-                row["metrics"] = {**judged["metrics"], **citations, "answer_error": float(bool(row["error"]))}
+                row["metrics"] = {**judged["metrics"], **citations, "answer_error": 0.0}
             except (httpx.HTTPError, KeyError, ValueError) as error:
                 row["error"] = f"{type(error).__name__}: {error}"
                 row["metrics"] = {"answer_error": 1.0}
@@ -204,6 +210,8 @@ def _latency_stage(client: EspertoClient, spec: RunSpec, questions: list[Questio
                 row = {"config": name, "id": question.id, "repeat": repeat}
                 try:
                     result = client.ask(question.question, use_planner, options)
+                    if result["error"]:
+                        raise ValueError(result["error"])
                     row["metrics"] = {k: result[k] for k in ("retrieval_s", "ttft_s", "total_s") if result[k] is not None}
                 except (httpx.HTTPError, KeyError, ValueError) as error:
                     row["error"] = f"{type(error).__name__}: {error}"

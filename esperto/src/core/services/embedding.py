@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Sequence
 
 import torch
 from FlagEmbedding import BGEM3FlagModel  # type: ignore
 from langchain_core.documents import Document
 
-from ..shared.settings import (
+from config import (
     BGE_M3_DEVICE,
     BGE_M3_USE_FP16,
     DENSE_MODEL_NAME,
@@ -20,6 +21,7 @@ from ..shared.vectors import QueryVectors, lexical_weights_to_sparse_vector
 logger = logging.getLogger("EspertoEmbedding")
 
 _query_model: BGEM3FlagModel | None = None
+_query_model_lock = threading.Lock()
 
 
 def _indexing_device() -> str:
@@ -46,9 +48,10 @@ def load_indexing_model() -> BGEM3FlagModel:
 def get_query_model() -> BGEM3FlagModel:
     """Lazily load BGE-M3 on CPU to leave the GPU available for Ollama."""
     global _query_model
-    if _query_model is None:
-        logger.info("Caricamento BGE-M3 per query su CPU.")
-        _query_model = BGEM3FlagModel(DENSE_MODEL_NAME, use_fp16=False, devices="cpu")
+    with _query_model_lock:  # richieste concorrenti non devono caricare il modello piu' volte
+        if _query_model is None:
+            logger.info("Caricamento BGE-M3 per query su CPU.")
+            _query_model = BGEM3FlagModel(DENSE_MODEL_NAME, use_fp16=False, devices="cpu")
     return _query_model
 
 
