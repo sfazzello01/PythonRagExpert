@@ -63,10 +63,16 @@ def encoded(monkeypatch):
     return calls
 
 
-def _retrieve(options=RetrievalOptions(), questions=("sotto-domanda",), related=None):
+def _retrieve(options=RetrievalOptions(), questions=("sotto-domanda",), related=None, named=(), seeds=None):
     client = FakeClient()
     retriever = retrieval.HybridRetriever(client)
-    retriever._symbol_graph = SimpleNamespace(related_chunks=lambda chunk_ids, limit: related or {})
+
+    def related_chunks(chunk_ids, limit):
+        if seeds is not None:
+            seeds.append(set(chunk_ids))
+        return related or {}
+
+    retriever._symbol_graph = SimpleNamespace(related_chunks=related_chunks, chunks_named=lambda text: list(named))
     sources = asyncio.run(retriever.retrieve(list(questions), "domanda", options))
     return client, sources
 
@@ -90,10 +96,16 @@ def test_all_questions_are_encoded_once_with_the_original_first(encoded):
     assert encoded == [["domanda", "prima", "seconda"]]
 
 
-def test_without_colbert_sources_keep_the_fusion_ranking(encoded):
-    client, sources = _retrieve(RetrievalOptions(use_colbert=False, use_same_file=False))
+def test_without_colbert_candidates_are_ranked_by_a_final_fusion(encoded):
+    client, sources = _retrieve(RetrievalOptions(use_colbert=False))
     assert all("using" not in call for call in client.calls)
+    # Senza una classifica comune il primo chunk di ogni ricerca per file avrebbe lo score massimo;
+    # l'ultima chiamata riordina invece tutti i candidati sulla domanda originale.
+    final = client.calls[-1]
+    assert len(final["query_filter"].must[0].has_id) == 4 and final["limit"] == 4
+    assert all(prefetch.limit == 4 for prefetch in final["prefetch"])
     assert [source["chunk_id"] for source in sources] == ["low", "top", "mid", "noise"]
+    assert [source["score"] for source in sources] == [1.0, 0.5, 1 / 3, 0.25]
 
 
 def test_context_budget_limits_the_sources(encoded, monkeypatch):
@@ -121,3 +133,27 @@ def test_graph_quota_grows_with_the_number_of_questions(encoded, monkeypatch):
     _, two_questions = _retrieve(options, related=related)
     assert [source["chunk_id"] for source in one_question if source["graph_relation"]] == ["noise"]
     assert [source["chunk_id"] for source in two_questions if source["graph_relation"]] == ["noise", "low"]
+
+
+def test_k_can_be_overridden_per_request(encoded):
+    client, _ = _retrieve(RetrievalOptions(k=2, use_same_file=False, use_colbert=False))
+    assert client.calls[0]["limit"] == 2
+
+
+def test_symbols_named_in_the_question_come_first(encoded):
+    # "noise" e' sotto la soglia della ricerca: entra perche' la domanda lo nomina.
+    _, sources = _retrieve(named=["noise"])
+    assert [source["chunk_id"] for source in sources] == ["noise", "top", "mid", "low"]
+    assert sources[0]["score"] == 0.1
+
+
+def test_symbol_lookup_can_be_disabled(encoded):
+    _, sources = _retrieve(RetrievalOptions(use_symbol_lookup=False), named=["noise"])
+    assert [source["chunk_id"] for source in sources] == ["top", "mid", "low"]
+
+
+def test_graph_starts_from_search_results_and_named_symbols_only(encoded):
+    seeds = []
+    _retrieve(questions=(), named=["noise"], seeds=seeds)
+    # "low" entra come chunk dello stesso file di "top": non e' un seme.
+    assert seeds == [{"top", "mid", "noise"}]

@@ -6,11 +6,11 @@ from typing import Optional
 
 import httpx
 
-from config import JUDGE_MODEL, OLLAMA_URL, REQUEST_TIMEOUT
+from config import LLM_MODEL, OLLAMA_URL, REQUEST_TIMEOUT
 
 
 def chat(
-    prompt: str, system: Optional[str] = None, schema: Optional[dict] = None, model: str = JUDGE_MODEL
+    prompt: str, system: Optional[str] = None, schema: Optional[dict] = None, model: str = LLM_MODEL
 ) -> str:
     """Una chiamata deterministica (temperature 0, senza thinking); `schema` vincola l'output JSON."""
     messages = ([{"role": "system", "content": system}] if system else []) + [

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Optional
@@ -30,14 +31,21 @@ GENERATION_COLUMNS = [
     ("hallucination", "Hallucination (senza risposta)"),
     ("false_refusal", "Falsi rifiuti"),
     ("answer_error", "Errori"),
+    ("judged", "Giudicate"),
 ]
 LATENCY_COLUMNS = [("retrieval_s", "Retrieval (s)"), ("ttft_s", "TTFT (s)"), ("total_s", "Totale (s)")]
 
 
-def _load(path: Path) -> list[dict]:
+def _load_lines(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _load(path: Path) -> list[dict]:
+    rows = _load_lines(path)
+    # Dopo una ripresa una domanda puo' comparire due volte: vale l'ultimo tentativo.
+    return list({(row["config"], row["id"]): row for row in rows}.values())
 
 
 def _configs(rows: list[dict]) -> list[str]:
@@ -103,8 +111,11 @@ def _metric_names(rows: list[dict]) -> list[str]:
 
 def _metric_table(rows: list[dict], columns: list[tuple[str, str]]) -> str:
     return _table(
-        ["Config"] + [label for _, label in columns],
-        [[c] + [_cell(_stat(_values(rows, c, m))) for m, _ in columns] for c in _configs(rows)],
+        ["Config", "N"] + [label for _, label in columns],
+        [
+            [c, str(sum(row["config"] == c for row in rows))] + [_cell(_stat(_values(rows, c, m))) for m, _ in columns]
+            for c in _configs(rows)
+        ],
     )
 
 
@@ -147,6 +158,31 @@ def _latency_table(rows: list[dict]) -> str:
         ["Config"] + [f"{label} p50 / p95" for _, label in LATENCY_COLUMNS],
         [[c] + [cell(c, m) for m, _ in LATENCY_COLUMNS] for c in _configs(rows)],
     )
+
+
+def _apply_judgments(run_dir: Path, run_id: str, generation: list[dict]) -> None:
+    """Unisce i verdetti di `judgments.jsonl` alle risposte e ne ricava le metriche."""
+    judgments = {row["key"]: row for row in _load_lines(run_dir / "judgments.jsonl")}
+    facts = {row["key"]: len(row["key_facts"]) for row in _load_lines(run_dir / "to_judge.jsonl")}
+    for row in generation:
+        if row.get("error"):
+            continue
+        key = hashlib.sha1(f"{run_id}:{row['config']}:{row['id']}".encode("utf-8")).hexdigest()[:12]
+        judgment = judgments.get(key)
+        answerable = row["category"] != "unanswerable"
+        valid = judgment is not None and len(judgment.get("fact_verdicts") or []) == facts.get(key, -1)
+        row["metrics"]["judged"] = float(valid)
+        if not valid:
+            continue
+        row["fact_verdicts"], row["abstains"] = judgment["fact_verdicts"], judgment["abstains"]
+        # hallucination: risposta data a una domanda che non ha risposta; false_refusal: il contrario.
+        if answerable:
+            row["metrics"]["correctness"] = sum(judgment["fact_verdicts"]) / len(judgment["fact_verdicts"])
+            row["metrics"]["false_refusal"] = float(judgment["abstains"])
+        else:
+            row["metrics"]["hallucination"] = float(not judgment["abstains"])
+        if judgment.get("faithful") is not None:
+            row["metrics"]["faithfulness"] = float(judgment["faithful"])
 
 
 def _judge_agreement(generation: list[dict], labels_path: Path) -> str:
@@ -192,12 +228,13 @@ def write_report(run_dir: Path, labels_path: Path) -> None:
     retrieval_rows = _load(run_dir / "retrieval.jsonl")
     retrieval = [r for r in retrieval_rows if "metrics" in r]
     generation = _load(run_dir / "generation.jsonl")
-    latency = _load(run_dir / "latency.jsonl")
+    _apply_judgments(run_dir, manifest["run_id"], generation)
+    judged = sum(row.get("metrics", {}).get("judged", 0) for row in generation)
+    latency = [r for r in generation if "total_s" in r.get("metrics", {})]  # tempi misurati in generazione
 
     entries = (
         _summary_entries("retrieval", retrieval, _metric_names(retrieval))
         + _summary_entries("generation", generation, _metric_names(generation))
-        + _summary_entries("latency", latency, _metric_names(latency))
     )
     for category in sorted({r["category"] for r in retrieval}):
         for config in _configs(retrieval):
@@ -212,8 +249,11 @@ def write_report(run_dir: Path, labels_path: Path) -> None:
     categories = ", ".join(f"{name}: {count}" for name, count in dataset["questions_by_category"].items())
     header = "\n".join([
         f"- Dataset: `{dataset['name']}` ({dataset['repo_url']} @ `{dataset['ref']}`, commit `{dataset['commit'][:10]}`)",
-        f"- Domande: {categories} (sha256 `{dataset['questions_sha256'][:12]}`)",
-        f"- Modello esperto: `{manifest['rag_params']['LLM_MODEL']}`; giudice: `{manifest['judge_model']}`",
+        f"- Gold set: {categories} (sha256 `{dataset['questions_sha256'][:12]}`)",
+        f"- Campione: {dataset.get('sampled_questions', 'n/d')} domande"
+        f" (per categoria: {manifest['spec'].get('per_category') or 'tutte'}, seed {manifest['spec'].get('seed', 0)})",
+        f"- Modello esperto: `{manifest['rag_params']['LLM_MODEL']}`; giudice esterno: {int(judged)} risposte giudicate"
+        " (`to_judge.jsonl` -> `POST /runs/{id}/judgments`)",
         f"- Indicizzazione: {job.get('indexing_seconds', 'n/d')} s, {manifest['esperto_health'].get('points_count', 'n/d')} punti",
         "- Celle: media [IC 95% bootstrap sulle domande]; `*` = differenza appaiata con IC che esclude 0.",
     ])
@@ -226,9 +266,10 @@ def write_report(run_dir: Path, labels_path: Path) -> None:
         ]
     if generation:
         sections += [
-            "## Generazione (giudice LLM)", _metric_table(generation, GENERATION_COLUMNS),
+            "## Generazione", _metric_table(generation, GENERATION_COLUMNS),
+            "### Correttezza per categoria", _category_table(generation, "correctness"),
             "### Validazione del giudice contro etichette umane", _judge_agreement(generation, labels_path),
         ]
     if latency:
-        sections += ["## Latenza", *_error_note(latency), _latency_table(latency)]
+        sections += ["## Latenza (dalle richieste di generazione)", _latency_table(latency)]
     (run_dir / "report.md").write_text("\n\n".join(sections) + "\n", encoding="utf-8")

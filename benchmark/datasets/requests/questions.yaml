@@ -927,3 +927,78 @@
   category: unanswerable
   question: "Come si usa la funzione download_file per scaricare un file mostrando una barra di avanzamento?"
   reference_answer: "Non esiste una funzione download_file nel codice."
+
+# ---------------------------------------------------------------- overview
+# Domande di panoramica: nessun simbolo rilevante (niente metriche di retrieval), solo fatti chiave.
+- id: ov01
+  category: overview
+  question: "Descrivi la codebase: che cos'è e a cosa serve?"
+  key_facts:
+    - "È una libreria HTTP per Python (Requests), pensata per essere semplice da usare."
+    - "Permette di inviare richieste HTTP (GET, POST, ecc.) e di leggere la risposta (status code, header, testo, JSON)."
+    - "Si appoggia a urllib3 per il trasporto e le connessioni."
+  reference_answer: "Requests è una libreria HTTP per Python semplice da usare: invia richieste HTTP/1.1 e restituisce la risposta, appoggiandosi a urllib3 per le connessioni."
+
+- id: ov02
+  category: overview
+  question: "Quali sono le funzionalità principali offerte dalla libreria?"
+  key_facts:
+    - "Sessioni con persistenza dei cookie."
+    - "Keep-alive e connection pooling."
+    - "Autenticazione Basic e Digest."
+    - "Verifica TLS/SSL dei certificati."
+    - "Upload di file multipart."
+  reference_answer: "Tra le funzionalità: sessioni con cookie persistenti, keep-alive e connection pooling, autenticazione Basic e Digest, verifica TLS/SSL, upload multipart, proxy SOCKS, timeout, download in streaming, .netrc."
+
+- id: ov03
+  category: overview
+  question: "Com'è organizzato il repository? Quali sono le cartelle principali e cosa contengono?"
+  key_facts:
+    - "Il codice della libreria è in src/requests."
+    - "I test sono nella cartella tests."
+    - "La documentazione è nella cartella docs."
+  reference_answer: "Il codice è in src/requests (api, sessions, models, adapters, auth, cookies, utils, ...), i test in tests e la documentazione in docs; alla radice ci sono README, HISTORY e i file di packaging."
+
+- id: ov04
+  category: overview
+  question: "Come si installa la libreria e quali versioni di Python supporta?"
+  key_facts:
+    - "Si installa da PyPI con pip (python -m pip install requests)."
+    - "Supporta ufficialmente Python 3.8 e successivi."
+  reference_answer: "Si installa con `python -m pip install requests` e supporta ufficialmente Python 3.8+."
+
+- id: ov05
+  category: overview
+  question: "Qual è il modo più semplice di usare la libreria per fare una richiesta e leggere la risposta?"
+  key_facts:
+    - "Si chiama una funzione di modulo come requests.get(url)."
+    - "La chiamata restituisce un oggetto Response."
+    - "Dalla risposta si leggono status_code, text e json()."
+  reference_answer: "Si chiama requests.get(url) (o post, put, ...), che restituisce un Response da cui leggere status_code, headers, text e json()."
+
+- id: ov06
+  category: overview
+  question: "Riassumi l'architettura ad alto livello: quali componenti attraversa una richiesta?"
+  key_facts:
+    - "Le funzioni di api.py (requests.get, ecc.) delegano a una Session."
+    - "La Session prepara la richiesta come PreparedRequest."
+    - "Un adapter di trasporto (HTTPAdapter) la invia tramite urllib3."
+    - "Il risultato è un oggetto Response."
+  reference_answer: "Le funzioni di api.py aprono una Session; la Session costruisce un PreparedRequest e lo passa a un HTTPAdapter, che usa urllib3 e costruisce il Response."
+
+- id: ov07
+  category: overview
+  question: "Come sono organizzati ed eseguiti i test del progetto?"
+  key_facts:
+    - "I test usano pytest."
+    - "Sono nella cartella tests, in file come test_requests.py, test_utils.py e test_adapters.py."
+    - "Per le richieste HTTP di prova usano httpbin (pytest-httpbin)."
+  reference_answer: "I test sono in tests/ (test_requests.py, test_utils.py, test_adapters.py, ...), si eseguono con pytest e usano httpbin tramite pytest-httpbin, più un piccolo server di test in tests/testserver."
+
+- id: ov08
+  category: overview
+  question: "Con quale licenza è distribuito il progetto e qual è la sua descrizione ufficiale?"
+  key_facts:
+    - "La licenza è Apache 2.0."
+    - "La descrizione ufficiale è 'Python HTTP for Humans.'"
+  reference_answer: "È distribuito con licenza Apache-2.0 e la descrizione del pacchetto è 'Python HTTP for Humans.'"

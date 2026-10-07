@@ -18,7 +18,9 @@ def test_gold_set_loads_with_expected_shape():
     categories = {}
     for question in dataset.questions:
         categories[question.category] = categories.get(question.category, 0) + 1
-    assert categories == {"lookup": 20, "behavior": 20, "multihop": 20, "architecture": 10, "unanswerable": 10}
+    assert categories == {
+        "lookup": 20, "behavior": 20, "multihop": 20, "architecture": 10, "overview": 8, "unanswerable": 10,
+    }
     assert any(r.hop == 2 for q in dataset.questions for r in q.relevant)
 
 
@@ -31,6 +33,9 @@ def test_gold_set_matches_the_checkout():
 def test_question_shape_is_enforced():
     with pytest.raises(ValueError):
         Question(id="x", category="lookup", question="?")  # manca il gold
+    with pytest.raises(ValueError):
+        Question(id="x", category="lookup", question="?", key_facts=["f"])  # mancano i simboli
+    Question(id="x", category="overview", question="?", key_facts=["f"])  # panoramica: bastano i fatti
     with pytest.raises(ValueError):
         Question(id="x", category="unanswerable", question="?", key_facts=["f"])
     with pytest.raises(ValueError):

@@ -15,7 +15,7 @@ from pydantic import BaseModel, model_validator
 
 from config import DATASETS_DIR, REPO_CACHE_DIR, SUPPORTED_EXTENSIONS
 
-CATEGORIES = ("lookup", "behavior", "multihop", "architecture", "unanswerable")
+CATEGORIES = ("lookup", "behavior", "multihop", "architecture", "overview", "unanswerable")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -45,8 +45,11 @@ class Question(BaseModel):
     def _check_shape(self) -> "Question":
         if self.category not in CATEGORIES:
             raise ValueError(f"{self.id}: categoria sconosciuta {self.category!r}")
-        if self.answerable and not (self.relevant and self.key_facts):
-            raise ValueError(f"{self.id}: servono relevant e key_facts")
+        if self.answerable and not self.key_facts:
+            raise ValueError(f"{self.id}: servono i key_facts")
+        # Le domande di panoramica non hanno un simbolo da recuperare: si valutano solo sulla risposta.
+        if self.answerable and self.category != "overview" and not self.relevant:
+            raise ValueError(f"{self.id}: servono i simboli rilevanti")
         if not self.answerable and (self.relevant or self.key_facts):
             raise ValueError(f"{self.id}: una domanda senza risposta non ha gold")
         return self

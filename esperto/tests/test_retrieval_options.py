@@ -34,7 +34,7 @@ def _search(options):
 
 def test_defaults_enable_every_stage():
     options = RetrievalOptions()
-    assert all(vars(options).values())
+    assert options.k is None and all(value for name, value in vars(options).items() if name != "k")
 
 
 def test_at_least_one_first_stage_is_required():

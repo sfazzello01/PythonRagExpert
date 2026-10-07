@@ -7,11 +7,9 @@ ESPERTO_URL = os.getenv("ESPERTO_URL", "http://esperto:5000")
 INDEXER_URL = os.getenv("ESPERTO_INDEXER_URL", "http://esperto_indexer:5001")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 
-# Closed-book usa il modello di esperto; il giudice anche, salvo JUDGE_MODEL
-# (giudice = generatore e' un limite da dichiarare in tesi).
+# Modello di esperto, usato dalla baseline closed-book. Le risposte sono giudicate fuori dal
+# servizio (vedi `to_judge.jsonl` e POST /runs/{id}/judgments): nessun LLM giudice qui.
 LLM_MODEL = os.getenv("LLM_MODEL", "")
-JUDGE_MODEL = os.getenv("JUDGE_MODEL") or LLM_MODEL
-JUDGE_CONTEXT_MAX_CHARS = int(os.getenv("JUDGE_CONTEXT_MAX_CHARS", "40000"))
 
 REQUEST_TIMEOUT = float(os.getenv("BENCHMARK_REQUEST_TIMEOUT", "300"))
 INDEX_TIMEOUT_SECONDS = float(os.getenv("BENCHMARK_INDEX_TIMEOUT", "3600"))

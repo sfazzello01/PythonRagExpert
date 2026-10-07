@@ -88,3 +88,17 @@ def test_large_class_is_split_into_header_and_methods(tmp_path, monkeypatch):
     assert by_symbol["Big.m1"].metadata["chunk_type"] == "method"
     assert "@property\n    def m1" in by_symbol["Big.m1"].page_content
     assert len({doc.metadata["chunk_id"] for doc in documents}) == 4
+
+
+def test_relation_headers_are_prepended_to_the_chunk():
+    from langchain_core.documents import Document
+
+    from src.core.indexing.pipeline import _add_relation_headers
+
+    documents = [
+        Document(page_content="class Child", metadata={"chunk_id": "child"}),
+        Document(page_content="def plain", metadata={"chunk_id": "plain"}),
+    ]
+    _add_relation_headers(documents, {"child": {"inherits": ["Base"], "calls": ["helper", "Base.run"]}})
+    assert documents[0].page_content == "# EREDITA DA: Base\n# CHIAMA: helper, Base.run\nclass Child"
+    assert documents[1].page_content == "def plain"

@@ -76,17 +76,31 @@ def _save_last_prompt(prompt_value) -> None:
     temporary_path.replace(destination)
 
 
+def _build_context(sources: list[dict]) -> str:
+    """Join the sources grouped by file: files by their best-ranked chunk, chunks in source order."""
+    file_rank: dict[str, int] = {}
+    for rank, source in enumerate(sources):
+        file_rank.setdefault(source["filename"], rank)
+    ordered = sorted(sources, key=lambda source: (file_rank[source["filename"]], source["start_line"] or 0))
+    return "\n\n---\n\n".join(source["content"] for source in ordered)
+
+
 async def retrieve_only(
     question: str,
     use_planner: bool = True,
     options: RetrievalOptions = RetrievalOptions(),
+    subquestions: list[str] | None = None,
 ) -> tuple[list[str], list[dict]]:
-    """Run planner + retrieval without generation; returns (subquestions, sources)."""
-    subquestions = (
-        await plan_subquestions(question, _planner_llm, _repo_map() if options.use_repo_map else "")
-        if use_planner
-        else [question]
-    )
+    """Run planner + retrieval without generation; returns (subquestions, sources).
+
+    Con `subquestions` il planner non viene chiamato: si riusa un piano gia' calcolato.
+    """
+    if subquestions is None:
+        subquestions = (
+            await plan_subquestions(question, _planner_llm, _repo_map() if options.use_repo_map else "")
+            if use_planner
+            else [question]
+        )
     return subquestions, await _get_retriever().retrieve(subquestions, question, options)
 
 
@@ -98,7 +112,7 @@ async def stream_expert_response(
 ):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
     subquestions, sources = await retrieve_only(question, use_planner, options)
-    context = "\n\n---\n\n".join(source["content"] for source in sources)
+    context = _build_context(sources)
     repo_map = _repo_map() if options.use_repo_map else ""
     yield json.dumps(
         {"type": "sources", "data": {"sources": sources, "subquestions": subquestions, "repo_map": repo_map}},

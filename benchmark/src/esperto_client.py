@@ -20,6 +20,11 @@ class EspertoClient:
         response.raise_for_status()
         return response.json()
 
+    def indexed_filename(self) -> Optional[str]:
+        """Nome dello ZIP dell'indice attivo, o None se l'ultimo job non e' andato a buon fine."""
+        status = self._http.get(f"{INDEXER_URL}/status").json()
+        return status["job"]["filename"] if status["status"] == "ready" else None
+
     def index_zip(self, content: bytes, filename: str, poll_seconds: float = 5.0) -> dict:
         """Carica lo ZIP e attende la fine del job; restituisce il job (status, indexing_seconds, ...)."""
         response = self._http.post(f"{INDEXER_URL}/upload", files={"file": (filename, content, "application/zip")})
@@ -34,12 +39,14 @@ class EspertoClient:
             time.sleep(poll_seconds)
         raise TimeoutError("Timeout in attesa dell'indicizzazione")
 
-    def retrieve(self, question: str, use_planner: bool, options: dict) -> dict:
-        """Solo planner + retrieval. Aggiunge `seconds` (latenza end-to-end della chiamata)."""
+    def retrieve(
+        self, question: str, use_planner: bool, options: dict, subquestions: Optional[list[str]] = None
+    ) -> dict:
+        """Solo planner + retrieval (o retrieval su un piano gia' calcolato). Aggiunge `seconds`."""
         start = time.perf_counter()
         response = self._http.post(
             f"{ESPERTO_URL}/retrieve",
-            json={"message": question, "use_planner": use_planner, "retrieval": options},
+            json={"message": question, "use_planner": use_planner, "retrieval": options, "subquestions": subquestions},
         )
         response.raise_for_status()
         return {**response.json(), "seconds": time.perf_counter() - start}

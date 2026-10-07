@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from config import (
 
 logger = logging.getLogger("EspertoSymbolGraph")
 
+# Oltre questo numero di definizioni un nome (es. `run`, `__init__`) e' ambiguo e non viene usato.
+MAX_NAME_MATCHES = 3
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
 
 class SymbolGraph:
     """Resolve related callers and callees to their enclosing indexed chunks."""
@@ -29,6 +34,22 @@ class SymbolGraph:
         self._nodes: dict[str, dict] = {}
         self._neighbors: dict[str, list[tuple[str, str]]] = {}
         self._out_edges: dict[str, list[str]] = {}
+        self._chunks_by_name: dict[str, set[str]] = {}
+
+    def chunks_named(self, text: str) -> list[str]:
+        """Return the chunks defining the symbols that the text mentions by name."""
+        self._reload_if_needed()
+        chunk_ids: dict[str, None] = {}
+        for token in _IDENTIFIER.findall(text):
+            # Solo le parole che hanno la forma di un identificatore: una parola comune in
+            # minuscolo ("query", "test") non deve agganciare un simbolo omonimo.
+            if token == token.lower() and "_" not in token and "." not in token:
+                continue
+            for name in {token, *token.split(".")}:
+                matches = self._chunks_by_name.get(name, ())
+                if len(matches) <= MAX_NAME_MATCHES:
+                    chunk_ids.update(dict.fromkeys(sorted(matches)))
+        return list(chunk_ids)
 
     def related_chunks(self, chunk_ids: set[str], limit: int) -> dict[str, str]:
         """Return graph-related chunks ranked by Personalized PageRank.
@@ -156,9 +177,13 @@ class SymbolGraph:
 
         self._nodes = {node["id"]: node for node in graph.get("nodes", [])}
         chunk_to_symbols: dict[str, set[str]] = defaultdict(set)
+        chunks_by_name: dict[str, set[str]] = defaultdict(set)
         for node in self._nodes.values():
             if chunk_id := self._chunk_for_symbol(node["id"]):
                 chunk_to_symbols[chunk_id].add(node["id"])
+                # Tabella dei simboli: nome corto ("login") e qualificato ("BaseUser.login").
+                chunks_by_name[node["name"]].add(chunk_id)
+                chunks_by_name[node["id"].split("::", 1)[-1].replace("::", ".")].add(chunk_id)
         neighbors: dict[str, list[tuple[str, str]]] = defaultdict(list)
         out_edges: dict[str, list[str]] = defaultdict(list)
         for edge in graph.get("edges", []):
@@ -171,6 +196,7 @@ class SymbolGraph:
                 neighbors[target].append((source, f"called_by:{edge['kind']}"))
                 out_edges[source].append(target)
         self._chunk_to_symbols = dict(chunk_to_symbols)
+        self._chunks_by_name = dict(chunks_by_name)
         self._neighbors = dict(neighbors)
         self._out_edges = dict(out_edges)
         self._modified_at = modified_at
@@ -187,6 +213,7 @@ class SymbolGraph:
     def _reset(self) -> None:
         self._modified_at = None
         self._chunk_to_symbols = {}
+        self._chunks_by_name = {}
         self._nodes = {}
         self._neighbors = {}
         self._out_edges = {}

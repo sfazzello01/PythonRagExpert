@@ -16,6 +16,7 @@ Genera sotto-domande solo se migliorano chiaramente il retrieval.
 Ogni sotto-domanda deve essere rispondibile cercando nella codebase.
 Se la domanda è già specifica restituisci solo la domanda stessa; altrimenti genera
 da due a quattro sotto-domande a seconda della sua complessità. Non rispondere alla domanda.
+Le sotto-domande devono essere sempre nella stessa lingua usata nella domanda (ad esempio, se la domanda è in inglese, le sotto-domande devono essere in inglese).
 Restituisci esclusivamente JSON valido: {{"subquestions":["..."]}}.
 
 {repo_map}DOMANDA: {question}"""

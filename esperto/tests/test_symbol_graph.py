@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from src.core.indexing.symbol_graph import MAX_HEADER_CALLS, chunk_relations
 from src.core.services.symbol_graph import SymbolGraph
 
 
@@ -125,3 +126,53 @@ def test_equal_scores_prefer_the_shortest_path(tmp_path):
     graph_path = _write_graph(tmp_path, [("m::a", "m::z"), ("m::z", "m::seed")])
     related = SymbolGraph(graph_path).related_chunks({"chunk_seed"}, limit=6)
     assert list(related) == ["chunk_z", "chunk_a"]
+
+
+def _symbol_table(tmp_path: Path) -> SymbolGraph:
+    nodes = [
+        _node("m::BaseUser", "chunk_user"),
+        _node("m::BaseUser::login", None),  # metodo di una classe non spezzata: sta nel chunk della classe
+        _node("m::hash_password", "chunk_hash"),
+        *(_node(f"m::Engine{index}::run", f"chunk_run{index}") for index in range(4)),
+    ]
+    graph_path = tmp_path / "symbol_graph.json"
+    graph_path.write_text(json.dumps({"version": 1, "nodes": nodes, "edges": []}), encoding="utf-8")
+    return SymbolGraph(graph_path)
+
+
+def test_symbols_are_found_by_short_and_qualified_name(tmp_path):
+    table = _symbol_table(tmp_path)
+    assert table.chunks_named("Cosa fa `BaseUser.login`?") == ["chunk_user"]
+    assert table.chunks_named("come funziona hash_password e BaseUser") == ["chunk_hash", "chunk_user"]
+
+
+def test_ambiguous_and_plain_words_are_not_looked_up(tmp_path):
+    table = _symbol_table(tmp_path)
+    assert table.chunks_named("cosa fa self.run?") == []  # `run` e' definito in quattro chunk
+    assert table.chunks_named("come funziona il login") == []  # parola comune, non un identificatore
+
+
+def test_chunk_relations_list_bases_and_calls_per_chunk():
+    nodes = [
+        _node("m", None),
+        _node("m::Base", "chunk_base"),
+        _node("m::Child", "chunk_child"),
+        _node("m::Child::run", "chunk_run"),  # classe spezzata: il metodo ha un chunk proprio
+        _node("m::Child::helper", None),
+        *(_node(f"m::f{index}", f"chunk_f{index}") for index in range(MAX_HEADER_CALLS + 2)),
+    ]
+    edges = [
+        {"source": "m::Child", "target": "m::Base", "kind": "inherits", "line": 1},
+        {"source": "m::Child::helper", "target": "m::Child::run", "kind": "calls", "line": 2},
+        {"source": "m::Child::helper", "target": "m::Child::helper", "kind": "calls", "line": 3},
+        {"source": "m", "target": "m::Base", "kind": "calls", "line": 4},  # codice di modulo: nessun chunk
+        *(
+            {"source": "m::Child::run", "target": f"m::f{index}", "kind": "calls", "line": 5}
+            for index in range(MAX_HEADER_CALLS + 2)
+        ),
+    ]
+    relations = chunk_relations({"nodes": nodes, "edges": edges})
+    assert relations["chunk_child"] == {"inherits": ["Base"], "calls": ["Child.run"]}
+    assert relations["chunk_run"]["inherits"] == ["Base"]
+    assert relations["chunk_run"]["calls"] == [f"f{index}" for index in range(MAX_HEADER_CALLS)]
+    assert "chunk_base" not in relations

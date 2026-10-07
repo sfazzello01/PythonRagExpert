@@ -38,6 +38,7 @@ class RetrieveRequest(BaseModel):
     message: str = Field(..., min_length=MIN_MESSAGE_LENGTH, max_length=MAX_MESSAGE_LENGTH)
     use_planner: bool = True
     retrieval: RetrievalOptions = Field(default_factory=RetrievalOptions)
+    subquestions: list[str] | None = Field(default=None, description="Piano gia' calcolato: salta il planner")
 
 
 @app.get("/health")
@@ -81,7 +82,9 @@ async def retrieve(request: RetrieveRequest) -> dict:
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Il messaggio non puo' essere vuoto.")
-    subquestions, sources = await retrieve_only(message, request.use_planner, request.retrieval)
+    subquestions, sources = await retrieve_only(
+        message, request.use_planner, request.retrieval, request.subquestions
+    )
     return {"subquestions": subquestions, "sources": sources}
 
 

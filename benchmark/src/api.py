@@ -12,10 +12,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.responses import PlainTextResponse  # type: ignore
+from pydantic import BaseModel
 
-from config import RESULTS_DIR
+from config import DATASETS_DIR, RESULTS_DIR
 
 from .dataset import check_name, fetch_repo, load_dataset, validate_dataset
+from . import report
 from .runner import RunSpec, check_spec, execute_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -63,6 +65,43 @@ def start_run(spec: RunSpec) -> dict:
         _active_run = run_id
     threading.Thread(target=_execute_and_release, args=(run_id, spec), daemon=True).start()
     return {"run_id": run_id}
+
+
+@app.post("/runs/{run_id}/resume", status_code=202)
+def resume_run(run_id: str) -> dict:
+    """Riprende un run interrotto: stessa specifica, saltando indicizzazione e domande gia' completate."""
+    global _active_run
+    manifest = _run_dir(run_id) / "manifest.json"
+    if not manifest.exists():
+        raise HTTPException(status_code=409, detail="Run fermato prima di iniziare: avviarne uno nuovo")
+    spec = RunSpec(**{**json.loads(manifest.read_text(encoding="utf-8"))["spec"], "skip_index": True})
+    with _lock:
+        if _active_run is not None:
+            raise HTTPException(status_code=409, detail=f"Run {_active_run} in corso")
+        _active_run = run_id
+    threading.Thread(target=_execute_and_release, args=(run_id, spec), daemon=True).start()
+    return {"run_id": run_id}
+
+
+class Judgment(BaseModel):
+    key: str  # chiave della risposta in to_judge.jsonl
+    fact_verdicts: list[bool] = []  # un verdetto per fatto chiave, nello stesso ordine
+    abstains: bool  # la risposta dichiara che l'informazione non e' nel codice
+    faithful: bool | None = None  # ogni affermazione e' supportata dal contesto (facoltativo)
+
+
+@app.post("/runs/{run_id}/judgments")
+def submit_judgments(run_id: str, judgments: list[Judgment]) -> dict:
+    """Riceve i verdetti sulle risposte di `to_judge.jsonl` e rigenera il report."""
+    run_dir = _run_dir(run_id)
+    if not (run_dir / "to_judge.jsonl").exists():
+        raise HTTPException(status_code=409, detail="Nessuna risposta da giudicare in questo run")
+    (run_dir / "judgments.jsonl").write_text(
+        "".join(json.dumps(judgment.model_dump()) + "\n" for judgment in judgments), encoding="utf-8"
+    )
+    dataset = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["dataset"]["name"]
+    report.write_report(run_dir, DATASETS_DIR / dataset / "human_labels.json")
+    return {"received": len(judgments)}
 
 
 @app.get("/runs")

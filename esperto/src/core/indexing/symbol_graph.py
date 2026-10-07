@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -14,6 +15,9 @@ from .chunking import splits_into_methods, symbol_chunk_id
 from .discovery import relative_path
 
 logger = logging.getLogger("EspertoSymbolGraph")
+
+# Chiamate elencate al massimo nell'intestazione di un chunk.
+MAX_HEADER_CALLS = 8
 
 
 @dataclass(frozen=True)
@@ -242,9 +246,43 @@ def build_symbol_graph(files: list[Path]) -> dict:
     }
 
 
-def save_symbol_graph(files: list[Path]) -> dict:
-    """Atomically build and persist the graph produced by the current source set."""
-    graph = build_symbol_graph(files)
+def chunk_relations(graph: dict) -> dict[str, dict[str, list[str]]]:
+    """Per chunk, the symbols it inherits from and calls: they are written in the chunk header."""
+    nodes = {node["id"]: node for node in graph["nodes"]}
+
+    def chunk_of(symbol_id: str) -> str | None:
+        while symbol_id:
+            if chunk_id := nodes.get(symbol_id, {}).get("chunk_id"):
+                return chunk_id
+            symbol_id = symbol_id.rpartition("::")[0]
+        return None
+
+    relations: dict[str, dict[str, list[str]]] = defaultdict(lambda: {"inherits": [], "calls": []})
+    class_bases: dict[str, list[str]] = {}
+    for edge in graph["edges"]:
+        if edge["kind"] not in ("calls", "inherits"):
+            continue
+        chunk_id = chunk_of(edge["source"])
+        if not chunk_id or chunk_of(edge["target"]) == chunk_id:
+            continue
+        name = edge["target"].split("::", 1)[-1].replace("::", ".")
+        names = relations[chunk_id][edge["kind"]]
+        if name not in names:
+            names.append(name)
+        if edge["kind"] == "inherits":
+            class_bases[edge["source"]] = relations[chunk_id]["inherits"]
+    # I metodi di una classe spezzata stanno in chunk propri: riportano le basi della classe.
+    for node in graph["nodes"]:
+        bases = class_bases.get(node["id"].rpartition("::")[0])
+        if bases and node["chunk_id"]:
+            relations[node["chunk_id"]]["inherits"] = bases
+    for related in relations.values():
+        del related["calls"][MAX_HEADER_CALLS:]
+    return dict(relations)
+
+
+def save_symbol_graph(graph: dict) -> None:
+    """Atomically persist the graph produced by the current source set."""
     SYMBOL_GRAPH_FILE.parent.mkdir(parents=True, exist_ok=True)
     temporary_file = SYMBOL_GRAPH_FILE.with_suffix(".tmp")
     temporary_file.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -254,4 +292,3 @@ def save_symbol_graph(files: list[Path]) -> dict:
         len(graph["nodes"]),
         len(graph["edges"]),
     )
-    return graph

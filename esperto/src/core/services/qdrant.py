@@ -245,6 +245,7 @@ async def hybrid_search(
     query_filter: Optional[Filter] = None,
     options: RetrievalOptions = RetrievalOptions(),
     min_score_ratio: float = 0.0,
+    prefetch_limit: int = PREFETCH_LIMIT,
 ) -> list[Document]:
     """Fusione dense+sparse (RRF) seguita da reranking ColBERT sui soli candidati.
 
@@ -252,16 +253,16 @@ async def hybrid_search(
     """
     prefetch = []
     if options.use_dense:
-        prefetch.append(Prefetch(query=query_vectors.dense, using="dense", limit=PREFETCH_LIMIT, filter=query_filter))
+        prefetch.append(Prefetch(query=query_vectors.dense, using="dense", limit=prefetch_limit, filter=query_filter))
     if options.use_sparse:
-        prefetch.append(Prefetch(query=query_vectors.sparse, using="sparse", limit=PREFETCH_LIMIT, filter=query_filter))
+        prefetch.append(Prefetch(query=query_vectors.sparse, using="sparse", limit=prefetch_limit, filter=query_filter))
     response = await asyncio.wait_for(
         client.query_points(
             collection_name=QDRANT_COLLECTION,
             prefetch=prefetch,
             query=FusionQuery(fusion=Fusion.RRF),
             # Con ColBERT il rerank riceve tutti i candidati dei prefetch.
-            limit=len(prefetch) * PREFETCH_LIMIT if options.use_colbert else limit,
+            limit=len(prefetch) * prefetch_limit if options.use_colbert else limit,
             query_filter=query_filter,
             search_params=_QUANTIZATION_PARAMS,
             with_payload=not options.use_colbert,
@@ -299,16 +300,28 @@ async def rerank_chunk_ids(
     client: AsyncQdrantClient,
     query_vectors: QueryVectors,
     chunk_ids: list[str],
+    options: RetrievalOptions = RetrievalOptions(),
 ) -> list[Document]:
-    """Score already-known chunk IDs with ColBERT only, skipping the dense+sparse prefetch."""
+    """Score already-known chunk IDs against one query, so that they share a comparable score.
+
+    Con ColBERT e' il MaxSim sui soli ID; senza, la fusione dense+sparse ristretta agli stessi ID.
+    """
     if not chunk_ids:
         return []
+    id_filter = Filter(must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])])
+    if not options.use_colbert:
+        return await hybrid_search(
+            client,
+            query_vectors,
+            limit=len(chunk_ids),
+            query_filter=id_filter,
+            options=options,
+            prefetch_limit=len(chunk_ids),
+        )
     return await _query_colbert(
         client,
         query=query_vectors.colbert,
         limit=len(chunk_ids),
-        query_filter=Filter(
-            must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])]
-        ),
+        query_filter=id_filter,
         with_payload=True,
     )

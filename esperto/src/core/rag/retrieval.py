@@ -81,13 +81,27 @@ class HybridRetriever:
         self._client = client or get_async_client()
         self._symbol_graph = SymbolGraph()
 
-    async def _candidates(self, query_vectors: QueryVectors, options: RetrievalOptions) -> list[Document]:
-        """Candidate chunks for one question: hybrid search, same-file chunks, graph neighbors."""
+    async def _candidates(
+        self, question: str, query_vectors: QueryVectors, options: RetrievalOptions
+    ) -> list[Document]:
+        """Candidate chunks for one question: hybrid search, named symbols, same-file chunks, graph neighbors."""
+        named_ids = self._symbol_graph.chunks_named(question) if options.use_symbol_lookup else []
         # La soglia di rilevanza vale solo qui: chunk dello stesso file e rerank finale
         # servono a dare contesto e a ordinare, non a selezionare.
-        documents = await hybrid_search(
-            self._client, query_vectors, limit=K, options=options, min_score_ratio=SEMANTIC_RELEVANCE_RATIO
+        documents, named = await asyncio.gather(
+            hybrid_search(
+                self._client,
+                query_vectors,
+                limit=options.k or K,
+                options=options,
+                min_score_ratio=SEMANTIC_RELEVANCE_RATIO,
+            ),
+            get_documents_by_chunk_ids(self._client, named_ids),
         )
+        for document in named:
+            document.metadata["_symbol_match"] = True
+        # Il grafo parte dai soli semi: risultati della ricerca e simboli nominati nella domanda.
+        seed_ids = {document.metadata["chunk_id"] for document in chain(documents, named)}
         if options.use_same_file:
             filenames = dict.fromkeys(document.metadata["filename"] for document in documents)
             same_file = await asyncio.gather(
@@ -105,13 +119,11 @@ class HybridRetriever:
                 )
             )
             documents = _keep_highest_scoring(chain(documents, *same_file))
+        documents = [*named, *documents]
         if not options.use_symbol_graph:
             return documents
 
-        relations = self._symbol_graph.related_chunks(
-            {document.metadata["chunk_id"] for document in documents},
-            limit=SYMBOL_GRAPH_MAX_NEIGHBORS,
-        )
+        relations = self._symbol_graph.related_chunks(seed_ids, limit=SYMBOL_GRAPH_MAX_NEIGHBORS)
         graph_documents = await get_documents_by_chunk_ids(self._client, list(relations))
         for document in graph_documents:
             document.metadata["_graph_relation"] = relations[document.metadata["chunk_id"]]
@@ -136,29 +148,31 @@ class HybridRetriever:
         # Un solo passaggio BGE-M3 per tutte le domande; il primo vettore e' la domanda originale.
         query_vectors = await asyncio.to_thread(encode_queries, retrieval_questions)
         candidates = await asyncio.gather(
-            *(self._candidates(vectors, options) for vectors in query_vectors)
+            *(
+                self._candidates(question, vectors, options)
+                for question, vectors in zip(retrieval_questions, query_vectors)
+            )
         )
         documents: dict[str, Document] = {}
         neighbors: dict[str, Document] = {}
+        named: set[str] = set()
         for document in chain.from_iterable(candidates):
             target = neighbors if "_graph_relation" in document.metadata else documents
             target.setdefault(document.metadata["chunk_id"], document)
+            if "_symbol_match" in document.metadata:
+                named.add(document.metadata["chunk_id"])
 
-        if options.use_colbert:
-            # Gli score delle sotto-domande non sono confrontabili: rerank sulla domanda originale.
-            reranked = await rerank_chunk_ids(self._client, query_vectors[0], list(documents))
-            scores = {
-                document.metadata["chunk_id"]: document.metadata["_colbert_score"]
-                for document in reranked
-            }
-        else:
-            scores = {
-                chunk_id: document.metadata.get("_colbert_score")
-                for chunk_id, document in documents.items()
-            }
+        # Gli score di ricerche diverse (sotto-domande, stesso file) non sono confrontabili:
+        # tutti i candidati vengono rivalutati sulla domanda originale.
+        reranked = await rerank_chunk_ids(self._client, query_vectors[0], list(documents), options)
+        scores = {document.metadata["chunk_id"]: document.metadata["_colbert_score"] for document in reranked}
+        # I simboli nominati nella domanda stanno in testa, anche se il rerank non li ha valutati.
         ranked = sorted(
-            (document for chunk_id, document in documents.items() if chunk_id in scores),
-            key=lambda document: -(scores[document.metadata["chunk_id"]] or 0.0),
+            (document for chunk_id, document in documents.items() if chunk_id in scores or chunk_id in named),
+            key=lambda document: (
+                document.metadata["chunk_id"] not in named,
+                -scores.get(document.metadata["chunk_id"], 0.0),
+            ),
         )
         # I vicini del grafo servono proprio quando non somigliano alla domanda: saltano il
         # rerank e hanno una quota riservata per ogni domanda, proporzionale ai loro posti
@@ -176,6 +190,6 @@ class HybridRetriever:
             RAG_CONTEXT_MAX_CHARS - sum(len(document.page_content) for document in graph_documents),
         )
         return [
-            *(_to_source(document, scores[document.metadata["chunk_id"]]) for document in ranked_documents),
+            *(_to_source(document, scores.get(document.metadata["chunk_id"])) for document in ranked_documents),
             *(_to_source(document, None) for document in graph_documents),
         ]
