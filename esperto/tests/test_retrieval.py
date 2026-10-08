@@ -11,7 +11,7 @@ from src.core.services.qdrant import _point_id
 from src.core.shared.options import RetrievalOptions
 from src.core.shared.vectors import QueryVectors
 
-# chunk_id -> (file, score ColBERT); l'ordine e' quello della fusione dense+sparse.
+# chunk_id -> (file, similarita' densa); l'ordine e' quello della fusione dense+sparse.
 CHUNKS = {"low": ("a.py", 0.2), "top": ("a.py", 0.9), "mid": ("b.py", 0.6), "noise": ("c.py", 0.1)}
 
 
@@ -57,7 +57,7 @@ def encoded(monkeypatch):
 
     def encode(texts):
         calls.append(list(texts))
-        return [QueryVectors(dense=[0.1], sparse=None, colbert=[[0.1]]) for _ in texts]
+        return [QueryVectors(dense=[0.1], sparse=None) for _ in texts]
 
     monkeypatch.setattr(retrieval, "encode_queries", encode)
     return calls
@@ -77,12 +77,16 @@ def _retrieve(options=RetrievalOptions(), questions=("sotto-domanda",), related=
     return client, sources
 
 
-def test_sources_are_deduplicated_and_ranked_by_colbert(encoded):
-    _, sources = _retrieve()
-    # "noise" (0.1) e' sotto la soglia 0.3 * 0.9 della ricerca; "low" (0.2) anche, ma rientra
-    # come chunk dello stesso file di "top" e il rerank finale lo ordina senza scartarlo.
-    assert [source["chunk_id"] for source in sources] == ["top", "mid", "low"]
-    assert [source["score"] for source in sources] == [0.9, 0.6, 0.2]
+def test_sources_are_deduplicated_and_ranked_by_a_final_fusion(encoded):
+    client, sources = _retrieve()
+    # "low" (0.2) e "noise" (0.1) sono sotto la soglia 0.3 * 0.9 della ricerca; "low" rientra
+    # come chunk dello stesso file di "top". Senza una classifica comune il primo chunk di ogni
+    # ricerca avrebbe lo score massimo: l'ultima chiamata riordina tutti i candidati sulla domanda.
+    final = client.calls[-1]
+    assert len(final["query_filter"].must[0].has_id) == 3 and final["limit"] == 3
+    assert all(prefetch.limit == 3 for prefetch in final["prefetch"])
+    assert [source["chunk_id"] for source in sources] == ["low", "top", "mid"]
+    assert [source["score"] for source in sources] == [1.0, 0.5, 1 / 3]
 
 
 def test_relevance_threshold_applies_only_to_the_question_search(encoded):
@@ -96,31 +100,19 @@ def test_all_questions_are_encoded_once_with_the_original_first(encoded):
     assert encoded == [["domanda", "prima", "seconda"]]
 
 
-def test_without_colbert_candidates_are_ranked_by_a_final_fusion(encoded):
-    client, sources = _retrieve(RetrievalOptions(use_colbert=False))
-    assert all("using" not in call for call in client.calls)
-    # Senza una classifica comune il primo chunk di ogni ricerca per file avrebbe lo score massimo;
-    # l'ultima chiamata riordina invece tutti i candidati sulla domanda originale.
-    final = client.calls[-1]
-    assert len(final["query_filter"].must[0].has_id) == 4 and final["limit"] == 4
-    assert all(prefetch.limit == 4 for prefetch in final["prefetch"])
-    assert [source["chunk_id"] for source in sources] == ["low", "top", "mid", "noise"]
-    assert [source["score"] for source in sources] == [1.0, 0.5, 1 / 3, 0.25]
-
-
 def test_context_budget_limits_the_sources(encoded, monkeypatch):
     monkeypatch.setattr(retrieval, "RAG_CONTEXT_MAX_SOURCES", 1)
     _, sources = _retrieve()
-    assert [source["chunk_id"] for source in sources] == ["top"]
+    assert [source["chunk_id"] for source in sources] == ["low"]
 
 
 def test_graph_neighbors_skip_the_rerank_and_keep_reserved_slots(encoded, monkeypatch):
     monkeypatch.setattr(retrieval, "RAG_CONTEXT_MAX_SOURCES", 2)
     monkeypatch.setattr(retrieval, "SYMBOL_GRAPH_MAX_NEIGHBORS", 1)
-    # "noise" e' sotto la soglia ColBERT, "top" e' gia' un risultato diretto.
+    # "noise" e' sotto la soglia di rilevanza, "top" e' gia' un risultato diretto.
     _, sources = _retrieve(related={"noise": "calls", "top": "called_by:calls"})
     assert [(source["chunk_id"], source["graph_relation"], source["score"]) for source in sources] == [
-        ("top", None, 0.9),
+        ("low", None, 1.0),
         ("noise", "calls", None),
     ]
 
@@ -136,20 +128,20 @@ def test_graph_quota_grows_with_the_number_of_questions(encoded, monkeypatch):
 
 
 def test_k_can_be_overridden_per_request(encoded):
-    client, _ = _retrieve(RetrievalOptions(k=2, use_same_file=False, use_colbert=False))
+    client, _ = _retrieve(RetrievalOptions(k=2, use_same_file=False))
     assert client.calls[0]["limit"] == 2
 
 
 def test_symbols_named_in_the_question_come_first(encoded):
     # "noise" e' sotto la soglia della ricerca: entra perche' la domanda lo nomina.
     _, sources = _retrieve(named=["noise"])
-    assert [source["chunk_id"] for source in sources] == ["noise", "top", "mid", "low"]
-    assert sources[0]["score"] == 0.1
+    assert [source["chunk_id"] for source in sources] == ["noise", "low", "top", "mid"]
+    assert sources[0]["score"] == 0.25
 
 
 def test_symbol_lookup_can_be_disabled(encoded):
     _, sources = _retrieve(RetrievalOptions(use_symbol_lookup=False), named=["noise"])
-    assert [source["chunk_id"] for source in sources] == ["top", "mid", "low"]
+    assert [source["chunk_id"] for source in sources] == ["low", "top", "mid"]
 
 
 def test_graph_starts_from_search_results_and_named_symbols_only(encoded):

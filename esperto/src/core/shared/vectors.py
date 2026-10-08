@@ -8,11 +8,10 @@ from qdrant_client.http.models import SparseVector  # type: ignore
 
 @dataclass(frozen=True)
 class QueryVectors:
-    """Dense, sparse, and ColBERT representations of a search query."""
+    """Dense and sparse representations of a search query."""
 
     dense: list[float]
     sparse: SparseVector
-    colbert: list[list[float]]
 
 
 def lexical_weights_to_sparse_vector(lexical_weights: Mapping[str, float]) -> SparseVector:

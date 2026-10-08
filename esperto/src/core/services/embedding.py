@@ -56,7 +56,7 @@ def get_query_model() -> BGEM3FlagModel:
 
 
 def encode_documents(model: BGEM3FlagModel, documents: Sequence[Document]) -> dict:
-    """Encode an indexing batch with all BGE-M3 vector representations."""
+    """Encode an indexing batch with the dense and sparse BGE-M3 representations."""
     texts = [document.page_content for document in documents]
     return model.encode(
         texts,
@@ -64,7 +64,7 @@ def encode_documents(model: BGEM3FlagModel, documents: Sequence[Document]) -> di
         max_length=EMBEDDING_MAX_LENGTH,
         return_dense=True,
         return_sparse=True,
-        return_colbert_vecs=True,
+        return_colbert_vecs=False,
     )
 
 
@@ -76,15 +76,14 @@ def encode_queries(texts: Sequence[str]) -> list[QueryVectors]:
         max_length=EMBEDDING_MAX_LENGTH,
         return_dense=True,
         return_sparse=True,
-        return_colbert_vecs=True,
+        return_colbert_vecs=False,
     )
     return [
         QueryVectors(
             dense=dense_vector.tolist(),
             sparse=lexical_weights_to_sparse_vector(lexical_weights),
-            colbert=colbert_vector.tolist(),
         )
-        for dense_vector, lexical_weights, colbert_vector in zip(
-            output["dense_vecs"], output["lexical_weights"], output["colbert_vecs"]
+        for dense_vector, lexical_weights in zip(
+            output["dense_vecs"], output["lexical_weights"]
         )
     ]

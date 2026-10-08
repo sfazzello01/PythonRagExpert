@@ -21,9 +21,6 @@ from qdrant_client.http.models import (  # type: ignore
     Fusion,
     FusionQuery,
     HasIdCondition,
-    HnswConfigDiff,
-    MultiVectorComparator,
-    MultiVectorConfig,
     PointStruct,
     Prefetch,
     QuantizationSearchParams,
@@ -132,7 +129,7 @@ def activate_collection(client: QdrantClient, collection: str) -> None:
 
 
 def create_hybrid_collection(client: QdrantClient, collection: str) -> None:
-    """Create a dense+sparse+ColBERT collection."""
+    """Create a dense+sparse collection."""
     client.create_collection(
         collection_name=collection,
         vectors_config={
@@ -144,22 +141,6 @@ def create_hybrid_collection(client: QdrantClient, collection: str) -> None:
                         type=ScalarType.INT8,
                         quantile=0.99,
                         always_ram=True,
-                    )
-                ),
-            ),
-            # ColBERT non indicizzato: solo storage su disco + int8, usato come
-            # reranker sui candidati della fusione dense+sparse (hybrid_search).
-            "colbert": VectorParams(
-                size=DENSE_DIMENSION,
-                distance=Distance.COSINE,
-                on_disk=True,
-                hnsw_config=HnswConfigDiff(m=0),
-                multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
-                quantization_config=ScalarQuantization(
-                    scalar=ScalarQuantizationConfig(
-                        type=ScalarType.INT8,
-                        quantile=0.99,
-                        always_ram=False,
                     )
                 ),
             ),
@@ -186,15 +167,13 @@ def upsert_encoded_documents(
             vector={
                 "dense": dense_vector.tolist(),
                 "sparse": lexical_weights_to_sparse_vector(lexical_weights),
-                "colbert": colbert_vector.tolist(),
             },
             payload={"page_content": document.page_content, "metadata": document.metadata},
         )
-        for document, dense_vector, lexical_weights, colbert_vector in zip(
+        for document, dense_vector, lexical_weights in zip(
             documents,
             encoded_batch["dense_vecs"],
             encoded_batch["lexical_weights"],
-            encoded_batch["colbert_vecs"],
         )
     ]
     try:
@@ -207,35 +186,20 @@ def upsert_encoded_documents(
             client.upsert(collection_name=collection, points=[point])
 
 
-async def _query_colbert(client: AsyncQdrantClient, **kwargs) -> list[Document]:
-    """Run a ColBERT query_points call with the shared timeout.
-
-    Timeout ed errori di Qdrant si propagano: un contesto vuoto sarebbe
-    indistinguibile da "nessun risultato".
-    """
+async def _dense_scores(client: AsyncQdrantClient, query_vectors: QueryVectors, point_ids: list) -> dict:
+    """Cosine similarity between the query and the given points (point ID -> score)."""
     response = await asyncio.wait_for(
         client.query_points(
             collection_name=QDRANT_COLLECTION,
-            using="colbert",
-            search_params=_QUANTIZATION_PARAMS,
-            **kwargs,
+            query=query_vectors.dense,
+            using="dense",
+            query_filter=Filter(must=[HasIdCondition(has_id=point_ids)]),
+            limit=len(point_ids),
+            with_payload=False,
         ),
         timeout=QDRANT_QUERY_TIMEOUT,
     )
-
-    if not response.points:
-        return []
-
-    return [
-        Document(
-            page_content=point.payload.get("page_content", ""),
-            metadata={
-                **point.payload.get("metadata", {}),
-                "_colbert_score": point.score,
-            },
-        )
-        for point in response.points
-    ]
+    return {point.id: point.score for point in response.points}
 
 
 async def hybrid_search(
@@ -247,9 +211,11 @@ async def hybrid_search(
     min_score_ratio: float = 0.0,
     prefetch_limit: int = PREFETCH_LIMIT,
 ) -> list[Document]:
-    """Fusione dense+sparse (RRF) seguita da reranking ColBERT sui soli candidati.
+    """Fusione dense+sparse (RRF): i primi `limit` chunk, con lo score RRF in `_score`.
 
-    Con `min_score_ratio` il rerank scarta i chunk sotto quella quota dello score migliore.
+    Con `min_score_ratio` si scartano i chunk la cui similarita' densa e' sotto quella quota
+    della migliore. Timeout ed errori di Qdrant si propagano: un contesto vuoto sarebbe
+    indistinguibile da "nessun risultato".
     """
     prefetch = []
     if options.use_dense:
@@ -261,39 +227,26 @@ async def hybrid_search(
             collection_name=QDRANT_COLLECTION,
             prefetch=prefetch,
             query=FusionQuery(fusion=Fusion.RRF),
-            # Con ColBERT il rerank riceve tutti i candidati dei prefetch.
-            limit=len(prefetch) * prefetch_limit if options.use_colbert else limit,
+            limit=limit,
             query_filter=query_filter,
             search_params=_QUANTIZATION_PARAMS,
-            with_payload=not options.use_colbert,
+            with_payload=True,
         ),
         timeout=QDRANT_QUERY_TIMEOUT,
     )
-
-    if not response.points:
-        return []
-
-    if not options.use_colbert:
-        # Lo score RRF e' salvato nella stessa chiave dello score ColBERT.
-        return [
-            Document(
-                page_content=point.payload.get("page_content", ""),
-                metadata={**point.payload.get("metadata", {}), "_colbert_score": point.score},
-            )
-            for point in response.points
-        ]
-
-    # I candidati rispettano gia' query_filter: il rerank li riordina per ID.
-    documents = await _query_colbert(
-        client,
-        query=query_vectors.colbert,
-        limit=limit,
-        query_filter=Filter(must=[HasIdCondition(has_id=[point.id for point in response.points])]),
-        with_payload=True,
-    )
-    best_score = max((document.metadata["_colbert_score"] for document in documents), default=0.0)
-    threshold = best_score * min_score_ratio
-    return [document for document in documents if document.metadata["_colbert_score"] >= threshold]
+    points = response.points
+    if points and min_score_ratio and options.use_dense:
+        # Lo score RRF dipende solo dalla posizione: la soglia usa la similarita' densa.
+        similarity = await _dense_scores(client, query_vectors, [point.id for point in points])
+        threshold = max(similarity.values(), default=0.0) * min_score_ratio
+        points = [point for point in points if similarity.get(point.id, 0.0) >= threshold]
+    return [
+        Document(
+            page_content=point.payload.get("page_content", ""),
+            metadata={**point.payload.get("metadata", {}), "_score": point.score},
+        )
+        for point in points
+    ]
 
 
 async def rerank_chunk_ids(
@@ -304,24 +257,15 @@ async def rerank_chunk_ids(
 ) -> list[Document]:
     """Score already-known chunk IDs against one query, so that they share a comparable score.
 
-    Con ColBERT e' il MaxSim sui soli ID; senza, la fusione dense+sparse ristretta agli stessi ID.
+    E' la fusione dense+sparse ristretta a quegli ID.
     """
     if not chunk_ids:
         return []
-    id_filter = Filter(must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])])
-    if not options.use_colbert:
-        return await hybrid_search(
-            client,
-            query_vectors,
-            limit=len(chunk_ids),
-            query_filter=id_filter,
-            options=options,
-            prefetch_limit=len(chunk_ids),
-        )
-    return await _query_colbert(
+    return await hybrid_search(
         client,
-        query=query_vectors.colbert,
+        query_vectors,
         limit=len(chunk_ids),
-        query_filter=id_filter,
-        with_payload=True,
+        query_filter=Filter(must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])]),
+        options=options,
+        prefetch_limit=len(chunk_ids),
     )

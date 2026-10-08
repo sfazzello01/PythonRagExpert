@@ -33,7 +33,7 @@ from .metrics import citation_stats, retrieval_metrics
 logger = logging.getLogger("Benchmark")
 
 _NAIVE = {
-    "use_sparse": False, "use_colbert": False, "use_same_file": False,
+    "use_sparse": False, "use_same_file": False,
     "use_symbol_graph": False, "use_symbol_lookup": False, "use_repo_map": False,
 }
 
@@ -44,7 +44,9 @@ CONFIGS: dict[str, tuple[bool, dict]] = {
     "no_symbol_graph": (True, {"use_symbol_graph": False}),
     "no_same_file": (True, {"use_same_file": False}),
     "no_symbol_lookup": (True, {"use_symbol_lookup": False}),
-    "no_colbert": (True, {"use_colbert": False}),
+    # Come `full` ma con un K fissato: per scegliere K senza cambiare la configurazione di esperto.
+    "full_k12": (True, {"k": 12}),
+    "full_k20": (True, {"k": 20}),
     "dense_only": (True, {"use_sparse": False}),
     "sparse_only": (True, {"use_dense": False}),
     "no_repo_map": (True, {"use_repo_map": False}),  # la mappa guida il planner e apre il prompt
@@ -59,7 +61,7 @@ CLOSED_BOOK = "closed_book"  # LLM senza contesto: misura quanto il modello cono
 class RunSpec(BaseModel):
     dataset: str
     stages: List[str] = ["retrieval", "generation"]
-    retrieval_configs: List[str] = list(CONFIGS)
+    retrieval_configs: List[str] = [name for name in CONFIGS if not name.startswith("full_k")]
     # La generazione e' lo stadio lento: di default solo sistema completo e le due baseline.
     generation_configs: List[str] = ["full", "naive", "naive_budget", CLOSED_BOOK]
     per_category: Optional[int] = 4  # domande estratte per categoria; None = tutto il gold set

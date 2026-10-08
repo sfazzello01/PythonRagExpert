@@ -14,7 +14,6 @@ class RetrievalOptions(BaseModel):
 
     use_dense: bool = True
     use_sparse: bool = True
-    use_colbert: bool = True
     use_same_file: bool = True
     use_symbol_graph: bool = True
     use_symbol_lookup: bool = True  # chunk dei simboli nominati nella domanda

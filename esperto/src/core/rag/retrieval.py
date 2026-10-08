@@ -38,7 +38,7 @@ def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
     by_id: dict[str, Document] = {}
     for document in documents:
         previous = by_id.get(document.metadata["chunk_id"])
-        if previous is None or document.metadata["_colbert_score"] > previous.metadata["_colbert_score"]:
+        if previous is None or document.metadata["_score"] > previous.metadata["_score"]:
             by_id[document.metadata["chunk_id"]] = document
     return list(by_id.values())
 
@@ -165,7 +165,7 @@ class HybridRetriever:
         # Gli score di ricerche diverse (sotto-domande, stesso file) non sono confrontabili:
         # tutti i candidati vengono rivalutati sulla domanda originale.
         reranked = await rerank_chunk_ids(self._client, query_vectors[0], list(documents), options)
-        scores = {document.metadata["chunk_id"]: document.metadata["_colbert_score"] for document in reranked}
+        scores = {document.metadata["chunk_id"]: document.metadata["_score"] for document in reranked}
         # I simboli nominati nella domanda stanno in testa, anche se il rerank non li ha valutati.
         ranked = sorted(
             (document for chunk_id, document in documents.items() if chunk_id in scores or chunk_id in named),

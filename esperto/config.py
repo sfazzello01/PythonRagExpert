@@ -114,5 +114,5 @@ INGESTION_WORKSPACE_DIR = config.ingestion_workspace_dir
 
 DENSE_DIMENSION = 1024
 SYMBOL_GRAPH_VERSION = 1
-# Da incrementare quando cambia il chunking: invalida gli indici gia' costruiti.
-CHUNKING_VERSION = 4
+# Da incrementare quando cambiano il chunking o i vettori salvati: invalida gli indici gia' costruiti.
+CHUNKING_VERSION = 5

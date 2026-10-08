@@ -30,7 +30,7 @@
 
 ### 1.1 Caratteristiche chiave
 
-- **Retrieval ibrido a tre vie**: ricerca densa (BGE-M3, 1024 dimensioni), ricerca lessicale sparsa (BM25-like) fuse con Reciprocal Rank Fusion (RRF), seguite da reranking token-level con vettori ColBERT.
+- **Retrieval ibrido**: ricerca densa (BGE-M3, 1024 dimensioni) e ricerca lessicale sparsa (BM25-like) fuse con Reciprocal Rank Fusion (RRF).
 - **Chunking semantico AST-aware**: i file Python sono suddivisi per funzione/classe tramite parsing AST, preservando gli import di contesto; fallback a chunking testuale per gli altri formati.
 - **Symbol graph statico**: grafo di chiamate/ereditarietà/import costruito via AST (senza eseguire il codice) e usato a runtime per espandere il contesto con simboli correlati, tramite BFS bidirezionale e Personalized PageRank.
 - **Planner LLM**: decomposizione opzionale della domanda in sotto-domande per interrogazioni multi-parte.
@@ -99,7 +99,7 @@ graph TB
 | `frontend_esperto` | build `./frontend_esperto` | 8005 (esposta) | UI web: chat con streaming, upload ZIP, badge di stato sistema |
 | `esperto` | build `./esperto` | 5000 (esposta) | API di interrogazione: `/ask` (streaming NDJSON), `/retrieve` e `/health` |
 | `esperto_indexer` | build `./esperto` (stessa immagine, comando diverso) | 5001 (solo interna) | Ingestion: `/upload`, `/status`, `/health`; esegue l'indicizzazione |
-| `qdrant` | `qdrant/qdrant:v1.19.1` | 6333 | Vector database: collezione ibrida dense + sparse + ColBERT |
+| `qdrant` | `qdrant/qdrant:v1.19.1` | 6333 | Vector database: collezione ibrida dense + sparse |
 | `ollama` | `ollama/ollama:0.33.3` | 11434 | Runtime LLM locale per la generazione in streaming |
 | `benchmark` (profilo `benchmark`) | build `./benchmark` | 5002 (esposta) | Valutazione: indicizza un repository di riferimento, interroga `esperto` su un gold set e produce il report |
 
@@ -355,7 +355,7 @@ Il grafo è costruito prima del chunking, perché le sue relazioni finiscono nel
 
 ### 5.7 Encoding e upsert
 
-I documenti sono processati in batch (`BATCH_SIZE`, tipicamente 8): `encode_documents()` invoca BGE-M3 ottenendo per ogni chunk tre rappresentazioni (`dense_vecs`, `lexical_weights`, `colbert_vecs`), quindi `upsert_encoded_documents()` costruisce i `PointStruct` con ID deterministico `uuid5(NAMESPACE_URL, "esperto:{chunk_id}")` e li carica sulla collection. Gli upsert falliti per dimensione eccessiva ricadono su inserimenti individuali.
+I documenti sono processati in batch (`BATCH_SIZE`, tipicamente 8): `encode_documents()` invoca BGE-M3 ottenendo per ogni chunk due rappresentazioni (`dense_vecs`, `lexical_weights`), quindi `upsert_encoded_documents()` costruisce i `PointStruct` con ID deterministico `uuid5(NAMESPACE_URL, "esperto:{chunk_id}")` e li carica sulla collection. Gli upsert falliti per dimensione eccessiva ricadono su inserimenti individuali.
 
 Al termine: `save()` scrive `index_state.json` (collection, fingerprint, numero file, versione grafo) e tocca il flag `index_complete`, che sblocca l'health check del servizio di query.
 
@@ -387,10 +387,10 @@ sequenceDiagram
         PL-->>BE: JSON {"subquestions": [...]} (max 4, fallback: domanda originale)
     end
     BE->>EM: encode_queries([domanda] + sotto-domande)
-    EM-->>BE: QueryVectors {dense, sparse, colbert}
+    EM-->>BE: QueryVectors {dense, sparse}
     loop ogni domanda (originale + sotto-domande), in parallelo
-        BE->>QD: hybrid_search: prefetch dense + sparse (RRF) → rerank ColBERT, top K sopra soglia
-        QD-->>BE: candidati con _colbert_score
+        BE->>QD: hybrid_search: prefetch dense + sparse (RRF), top K sopra la soglia di similarità densa
+        QD-->>BE: candidati con _score (RRF)
         BE->>SG: chunks_named(domanda) — tabella dei simboli
         SG-->>BE: chunk dei simboli nominati
         BE->>QD: get_documents_by_chunk_ids(nominati)
@@ -403,7 +403,7 @@ sequenceDiagram
         QD-->>BE: vicini del grafo (_graph_relation)
     end
     BE->>QD: rerank_chunk_ids: risultati diretti vs domanda originale
-    QD-->>BE: score ColBERT finali
+    QD-->>BE: score RRF finali
     BE->>BE: _apply_context_budget (quota del grafo + risultati diretti)
     BE-->>FE: evento NDJSON "sources" (fonti + sotto-domande + mappa)
     FE-->>U: rendering elenco fonti
@@ -422,17 +422,19 @@ Con `use_planner=true` (default nel frontend), `plan_subquestions()` in [planner
 
 Al retrieval partecipano la domanda originale più al massimo 4 sotto-domande uniche, codificate in un solo passaggio BGE-M3 e cercate in parallelo.
 
-### 6.3 Retrieval ibrido a tre vie
+### 6.3 Retrieval ibrido
 
 Implementato da `HybridRetriever` in [retrieval.py](esperto/src/core/rag/retrieval.py) e `hybrid_search()` in [services/qdrant.py](esperto/src/core/services/qdrant.py):
 
 1. **Prefetch parallelo**: ricerca densa (HNSW su vettore `dense`) e ricerca sparsa (vettore `sparse`, pesi lessicali BGE-M3), ciascuna con `PREFETCH_LIMIT` candidati (valore tipico 20).
 2. **Fusione RRF**: Reciprocal Rank Fusion combina i ranking denso e sparso senza richiedere normalizzazione degli score.
-3. **Reranking ColBERT**: tutti i candidati fusi (al più `2 × PREFETCH_LIMIT`) sono ri-ordinati con similarità MaxSim token-level (multi-vettore `colbert`, residente su disco e calcolato a query-time). Lo score finale è esposto come `_colbert_score`.
+3. **Soglia di rilevanza**: dei primi `K` chunk fusi si scartano quelli la cui similarità densa (coseno) è sotto `SEMANTIC_RELEVANCE_RATIO` volte la migliore. Lo score RRF dipende solo dalla posizione in classifica, quindi non si presta a una soglia; è esposto come `_score` e ordina i risultati.
+
+Fino alla versione precedente i candidati fusi erano riordinati con i multi-vettori ColBERT di BGE-M3. Il benchmark non ha mai misurato un guadagno (su `piccolo`, a parità di tutto il resto: Symbol MRR 0,74 senza contro 0,71 con, ctx recall 0,79 in entrambi), quindi il rerank è stato rimosso: l'indice non contiene più un vettore per token e l'indicizzazione calcola solo le rappresentazioni densa e sparsa.
 
 ### 6.4 Post-processing del contesto
 
-Per ogni domanda (originale e sotto-domande) si raccolgono i candidati con i simboli nominati, enrichment same-file ed espansione via grafo; i candidati di tutte le domande sono poi uniti per `chunk_id`; i risultati diretti sono ri-ordinati sulla domanda originale (`rerank_chunk_ids()`: con ColBERT, oppure con la fusione dense+sparse ristretta ai candidati quando ColBERT è disattivato), mentre i vicini del grafo saltano il rerank e occupano una quota riservata del budget:
+Per ogni domanda (originale e sotto-domande) si raccolgono i candidati con i simboli nominati, enrichment same-file ed espansione via grafo; i candidati di tutte le domande sono poi uniti per `chunk_id`; i risultati diretti sono ri-ordinati sulla domanda originale (`rerank_chunk_ids()`: la fusione dense+sparse ristretta ai candidati), mentre i vicini del grafo saltano il rerank e occupano una quota riservata del budget:
 
 1. **Deduplica** per `chunk_id` mantenendo lo score massimo (`_keep_highest_scoring()`).
 2. **Simboli nominati** (`use_symbol_lookup`): le parole della domanda con la forma di un identificatore (un underscore, un punto o una maiuscola) sono cercate nella tabella dei simboli (`SymbolGraph.chunks_named()`); i chunk che le definiscono entrano tra i candidati diretti, in parallelo alla ricerca ibrida, e nelle fonti stanno in testa. Un nome definito in più di `MAX_NAME_MATCHES=3` chunk è ambiguo e viene ignorato. Vale anche per le sotto-domande del planner.
@@ -474,15 +476,14 @@ Le fonti includono `filename`, `service`, `chunk_type`, `symbol_name`, `start_li
 
 ### 7.1 Spazi vettoriali della collection
 
-`QDRANT_COLLECTION` (default d'uso `codebase_expert_bgem3_v1`) è un **alias**: ogni indicizzazione crea una collection `<alias>_<timestamp>` e `activate_collection()` vi sposta l'alias in un'unica operazione, eliminando poi la precedente. Durante la ricostruzione, o se questa fallisce, le query continuano a vedere l'indice precedente con il suo symbol graph. La collection è **ibrida a tre spazi**, creata da `create_hybrid_collection()` in [services/qdrant.py](esperto/src/core/services/qdrant.py):
+`QDRANT_COLLECTION` (default d'uso `codebase_expert_bgem3_v1`) è un **alias**: ogni indicizzazione crea una collection `<alias>_<timestamp>` e `activate_collection()` vi sposta l'alias in un'unica operazione, eliminando poi la precedente. Durante la ricostruzione, o se questa fallisce, le query continuano a vedere l'indice precedente con il suo symbol graph. La collection è **ibrida a due spazi**, creata da `create_hybrid_collection()` in [services/qdrant.py](esperto/src/core/services/qdrant.py):
 
 | Vettore | Dimensione | Distanza | Indicizzazione | Storage | Quantizzazione | Ruolo |
 |---|---|---|---|---|---|---|
 | `dense` | 1024 | COSINE | HNSW | RAM | INT8 scalare (quantile 0.99, sempre in RAM) | Similarità semantica a livello di chunk |
 | `sparse` | variabile | — | indice sparse dedicato | RAM | — | Matching lessicale BM25-like (da `lexical_weights` BGE-M3) |
-| `colbert` | 1024 × N token | COSINE (MaxSim multi-vettore) | nessun HNSW | disco | INT8 (quantile 0.99, non residente in RAM) | Reranking fine token-level a query-time |
 
-La strategia complessiva è: **recall** da dense+sparse (con fusione RRF), **precisione** dal reranking ColBERT. La scelta di tenere il multi-vettore ColBERT su disco senza indice HNSW è deliberata: viene interrogato solo su ~50 candidati già filtrati, quindi il costo del confronto esaustivo è contenuto e si risparmia la RAM che un indice su multi-vettori richiederebbe.
+La fusione RRF combina i due spazi senza normalizzare gli score: la densa cattura il significato, la sparsa i termini esatti (nomi di simboli).
 
 ### 7.2 Payload dei punti
 
@@ -580,7 +581,7 @@ Interroga il sistema con risposta in streaming.
 | `message` | string | — | `MIN_MESSAGE_LENGTH` (3) ≤ len ≤ `MAX_MESSAGE_LENGTH` (5000), non vuoto dopo strip |
 | `use_planner` | bool | `true` | attiva la decomposizione in sotto-domande |
 | `use_reasoning` | bool | `false` | inoltra i frammenti di reasoning del modello, se prodotti |
-| `retrieval` | object | tutti `true` | `RetrievalOptions`: `use_dense`, `use_sparse`, `use_colbert`, `use_same_file`, `use_symbol_graph`, `use_symbol_lookup`, `use_repo_map`, più `k` (1–50, default: `K` di configurazione); almeno uno tra dense e sparse deve restare attivo |
+| `retrieval` | object | tutti `true` | `RetrievalOptions`: `use_dense`, `use_sparse`, `use_same_file`, `use_symbol_graph`, `use_symbol_lookup`, `use_repo_map`, più `k` (1–50, default: `K` di configurazione); almeno uno tra dense e sparse deve restare attivo |
 
 **Response**: `StreamingResponse`, `text/plain; charset=utf-8`, una riga JSON per evento:
 
@@ -652,7 +653,7 @@ Corpo di `POST /runs` (`RunSpec`):
 |---|---|---|
 | `dataset` | — | Nome della cartella in `benchmark/datasets/` |
 | `stages` | `["retrieval", "generation"]` | Stadi da eseguire |
-| `retrieval_configs` | tutte | `full`, `no_planner`, `no_symbol_graph`, `no_same_file`, `no_symbol_lookup`, `no_colbert`, `dense_only`, `sparse_only`, `no_repo_map`, `naive`, `naive_budget` (come `naive` ma con `k=50`: è il budget di contesto a tagliare, come in `full`) |
+| `retrieval_configs` | tutte | `full`, `no_planner`, `no_symbol_graph`, `no_same_file`, `no_symbol_lookup`, `dense_only`, `sparse_only`, `no_repo_map`, `naive`, `naive_budget` (come `naive` ma con `k=50`: è il budget di contesto a tagliare, come in `full`); su richiesta anche `full_k12` e `full_k20` (come `full` con K fissato, per scegliere K senza riavviare `esperto`) |
 | `generation_configs` | `["full", "naive", "naive_budget", "closed_book"]` | Configurazioni per cui generare le risposte (`closed_book` = modello senza contesto) |
 | `per_category` | `4` | Domande estratte per categoria; `null` = tutto il gold set |
 | `seed` | `0` | Seme del campionamento |
@@ -711,9 +712,9 @@ Tutta la configurazione del backend è centralizzata in `AppConfig` ([esperto/co
 
 | Variabile | Default | Vincoli | Descrizione |
 |---|---|---|---|
-| `K` | obbligatoria | 1–50 | Risultati tenuti dopo il rerank per ogni domanda (originale e sotto-domande) |
+| `K` | obbligatoria | 1–50 | Risultati tenuti dalla fusione per ogni domanda (originale e sotto-domande) |
 | `PREFETCH_LIMIT` | obbligatoria | 1–100 | Candidati prefetch per dense e sparse |
-| `SEMANTIC_RELEVANCE_RATIO` | obbligatoria | 0.0–1.0 | Soglia di rilevanza relativa allo score ColBERT migliore, applicata solo alla ricerca di ogni domanda (non ai chunk dello stesso file né al rerank finale) |
+| `SEMANTIC_RELEVANCE_RATIO` | obbligatoria | 0.0–1.0 | Soglia di rilevanza relativa alla similarità densa migliore, applicata solo alla ricerca di ogni domanda (non ai chunk dello stesso file né al rerank finale) |
 | `LLM_CONTEXT_TOKENS` | 20000 | ≥ 2000 | Finestra del modello: `num_ctx` di Ollama, da cui deriva il budget del contesto (due terzi, ~3 caratteri per token) |
 | `RAG_CONTEXT_MAX_SOURCES` | 35 | ≥ 1 | Numero massimo di fonti nel contesto |
 | `MIN_MESSAGE_LENGTH` / `MAX_MESSAGE_LENGTH` | obbligatorie | 1–100 / 100–50000 | Limiti lunghezza domanda (valori tipici 3 / 5000) |
@@ -848,7 +849,7 @@ Ogni upload produce una directory `job-{uuid}`; `_activate()` aggiorna il symlin
 | # | Decisione | Motivazione | Trade-off accettato |
 |---|---|---|---|
 | D1 | **Chunking AST-aware per Python** | Un chunk = un'unità semantica (funzione o classe; metodi solo per classi oltre 400 righe) con import di contesto: retrieval e citazioni più precise | Solo Python ha chunking strutturale; gli altri formati usano splitter testuale |
-| D2 | **Retrieval ibrido a tre vie (dense + sparse + ColBERT)** | La densa cattura semantica, la sparsa i termini esatti (nomi di simboli!), ColBERT rifinisce token-level | Costo computazionale a query-time per il reranking; multi-vettore su disco per contenerlo |
+| D2 | **Retrieval ibrido a due vie (dense + sparse), senza rerank ColBERT** | La densa cattura semantica, la sparsa i termini esatti (nomi di simboli!); il rerank ColBERT, presente in origine, non ha mai dato un guadagno misurabile nel benchmark | Nessun riordino token-level; in cambio indice più piccolo e indicizzazione più leggera |
 | D3 | **Symbol graph statico da AST** | Espansione del contesto lungo relazioni reali del codice senza eseguirlo | Grafo limitato a relazioni staticamente rilevabili; utile solo se il dataset contiene Python |
 | D4 | **Ingestion in subprocess con attivazione atomica** | Isolamento memoria/fallimenti; l'indice servito non è mai in stato intermedio (alias Qdrant) | Un job alla volta; latenza di avvio subprocess |
 | D5 | **Fingerprint per idempotenza** | Re-upload dello stesso archivio è quasi gratuito; rebuild automatico al variare di modello o contenuti | Nessuna indicizzazione incrementale: ogni modifica ricostruisce tutto |

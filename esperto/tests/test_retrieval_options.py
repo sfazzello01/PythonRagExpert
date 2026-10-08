@@ -23,12 +23,12 @@ class FakeClient:
         return SimpleNamespace(points=[point])
 
 
-VECTORS = QueryVectors(dense=[0.1], sparse=None, colbert=[[0.1]])
+VECTORS = QueryVectors(dense=[0.1], sparse=None)
 
 
-def _search(options):
+def _search(options, **kwargs):
     client = FakeClient()
-    documents = asyncio.run(qdrant.hybrid_search(client, VECTORS, limit=3, options=options))
+    documents = asyncio.run(qdrant.hybrid_search(client, VECTORS, limit=3, options=options, **kwargs))
     return client, documents
 
 
@@ -42,20 +42,23 @@ def test_at_least_one_first_stage_is_required():
         RetrievalOptions(use_dense=False, use_sparse=False)
 
 
-def test_default_search_runs_fusion_then_colbert():
-    client, _ = _search(RetrievalOptions())
+def test_default_search_is_one_fusion_query():
+    client, documents = _search(RetrievalOptions())
+    assert len(client.calls) == 1
     assert [p.using for p in client.calls[0]["prefetch"]] == ["dense", "sparse"]
-    assert client.calls[1]["using"] == "colbert"
+    assert client.calls[0]["with_payload"] is True and client.calls[0]["limit"] == 3
+    assert documents[0].metadata["chunk_id"] == "c1" and documents[0].metadata["_score"] == 0.5
+
+
+def test_relevance_threshold_uses_the_dense_similarity():
+    client, documents = _search(RetrievalOptions(), min_score_ratio=0.5)
+    assert client.calls[1]["using"] == "dense" and client.calls[1]["query_filter"].must[0].has_id == [1]
+    assert len(documents) == 1
+    # Senza ricerca densa non c'e' una similarita' su cui filtrare.
+    client, _ = _search(RetrievalOptions(use_dense=False), min_score_ratio=0.5)
+    assert len(client.calls) == 1
 
 
 def test_dense_only_has_a_single_prefetch():
     client, _ = _search(RetrievalOptions(use_sparse=False))
     assert [p.using for p in client.calls[0]["prefetch"]] == ["dense"]
-
-
-def test_without_colbert_returns_rrf_documents_in_one_query():
-    client, documents = _search(RetrievalOptions(use_colbert=False))
-    assert len(client.calls) == 1
-    assert client.calls[0]["with_payload"] is True and client.calls[0]["limit"] == 3
-    assert documents[0].metadata["chunk_id"] == "c1"
-    assert documents[0].metadata["_colbert_score"] == 0.5
