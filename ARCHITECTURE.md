@@ -48,8 +48,8 @@
 | Orchestrazione LLM | LangChain (core, ollama, text-splitters) | 1.5.3 / 1.1.0 / 1.1.2 |
 | Vector database | Qdrant | v1.19.1 (server) / 1.19.0 (client) |
 | LLM runtime | Ollama | 0.33.3 |
-| Embedding model | BGE-M3 (BAAI/bge-m3) via FlagEmbedding | 1.4.0 |
-| Deep learning | PyTorch (CUDA 12.4) | 2.6.0+cu124 |
+| Embedding model | BGE-M3 (BAAI/bge-m3), tokenizer `tokenizers` | 0.23.2 |
+| Inferenza embedding | ONNX Runtime (CPU), per query e indexing | 1.23.2 |
 | Frontend | Jinja2 + HTML/JS (no framework) | 3.1.6 |
 | Container | Docker + docker-compose | — |
 
@@ -84,7 +84,7 @@ graph TB
     IN -->|"upsert / create_collection"| QD
     BE -->|"ChatOllama astream"| OL
     BE -.->|"encode query (CPU, lazy)"| BGE
-    IN -.->|"encode documenti (GPU/CPU)"| BGE
+    IN -.->|"encode documenti (CPU)"| BGE
 
     BE --- ST[("esperto_state")]
     IN --- ST
@@ -108,7 +108,7 @@ graph TB
 `esperto` e `esperto_indexer` condividono codice e immagine Docker ma sono **processi separati per design**:
 
 - L'**indexer** esegue il lavoro pesante e sincrono (parsing AST, embedding in batch, upsert) senza bloccare il servizio di query.
-- Il **servizio di query** carica il modello di embedding solo per le query (lazy, su CPU di default) e mantiene latenze contenute.
+- Il **servizio di query** carica il modello di embedding solo per le query (lazy, su CPU con ONNX Runtime) e mantiene latenze contenute.
 - Lo stato condiviso transita solo attraverso **volumi su disco** (`esperto_state`, `esperto_workspace`) e **Qdrant**: non esiste comunicazione diretta tra i due processi.
 
 ---
@@ -140,8 +140,8 @@ graph LR
 |---|---|---|---|---|
 | `ollama` | `./ollama_data:/root/.ollama` | `OLLAMA_CONTEXT_LENGTH=${LLM_CONTEXT_TOKENS:-20000}`, `OLLAMA_KV_CACHE_TYPE=q4_0`, `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KEEP_ALIVE=-1` | — | NVIDIA ×1 (opzionale) |
 | `qdrant` | `./qdrant_data:/qdrant/storage` | — | TCP :6333, interval 10s, retries 12 | — |
-| `esperto` | `./hf_cache:/root/.cache/huggingface`, `./esperto_state:/app/state`, `esperto_workspace:/app/workspace`, `./esperto_debug:/app/debug` | `.env` + `HF_HOME`, `PROMPT_DEBUG_FILE=/app/debug/last_prompt.json` | `curl -f http://127.0.0.1:5000/health`, start_period 30s, retries 20 | NVIDIA ×1 (opzionale) |
-| `esperto_indexer` | `./hf_cache:/root/.cache/huggingface`, `./esperto_state:/app/state`, `esperto_workspace:/app/workspace` | `.env` + `HF_HOME`, `INGESTION_WORKSPACE_DIR=/app/workspace` | `curl -f http://127.0.0.1:5001/health`, start_period 15s | NVIDIA ×1 (opzionale) |
+| `esperto` | `./hf_cache:/root/.cache/huggingface`, `./esperto_state:/app/state`, `esperto_workspace:/app/workspace`, `./esperto_debug:/app/debug` | `.env` + `HF_HOME`, `PROMPT_DEBUG_FILE=/app/debug/last_prompt.json` | `curl -f http://127.0.0.1:5000/health`, start_period 30s, retries 20 | — |
+| `esperto_indexer` | `./hf_cache:/root/.cache/huggingface`, `./esperto_state:/app/state`, `esperto_workspace:/app/workspace` | `.env` + `HF_HOME`, `INGESTION_WORKSPACE_DIR=/app/workspace` | `curl -f http://127.0.0.1:5001/health`, start_period 15s | — |
 | `frontend_esperto` | — | `ESPERTO_URL=http://esperto:5000`, `ESPERTO_INDEXER_URL=http://esperto_indexer:5001`, `PYTHONPATH=/app` | — | — |
 | `benchmark` | `./benchmark/datasets:/app/datasets`, `./benchmark_results:/app/results` | `.env` + `ESPERTO_URL`, `ESPERTO_INDEXER_URL`, `OLLAMA_URL` | — | — |
 
@@ -174,7 +174,8 @@ esperto/
 ├── config.py                    # AppConfig (Pydantic): validazione centralizzata delle env
 ├── dockerfile                   # python:3.10-slim, dipendenze, EXPOSE 5000
 ├── pyproject.toml               # configurazione mypy
-├── requirements.txt
+├── requirements.txt             # ONNX Runtime, nessun PyTorch
+├── requirements-dev.txt         # requirements.txt + pytest (fuori dalle immagini)
 └── src/
     ├── api.py                   # FastAPI :5000 — POST /ask (streaming), POST /retrieve, GET /health
     ├── core/
@@ -292,7 +293,7 @@ flowchart TB
         I --> J{"is_current()?"}
         J -->|"sì: skip"| Z["touch index_complete<br/>job → ready"]
         J -->|"no"| K["create_hybrid_collection()<br/>nuova collection alias_timestamp"]
-        K --> L["load_indexing_model()<br/>BGE-M3 (GPU se disponibile)"]
+        K --> L["load_indexing_model()<br/>BGE-M3 (ONNX Runtime, CPU)"]
         L --> G2["build_symbol_graph()<br/>nodi e archi via AST"]
         G2 --> M["_chunk_sources()<br/>AST per .py, text splitter altrimenti"]
         M --> O["batch: encode_documents()<br/>+ _add_relation_headers()<br/>+ upsert_encoded_documents()"]
@@ -323,7 +324,7 @@ L'estrazione avviene in una directory di staging isolata `job-{uuid}` dentro il 
 
 L'indicizzazione vera e propria non gira nel processo dell'ingestion service ma in un **subprocess** (`python -m src.core.indexing.pipeline`) con override di `BASE_DIR`, che punta allo staging. Questo garantisce:
 
-- **Isolamento della memoria**: il modello BGE-M3 in modalità indexing (potenzialmente su GPU, FP16) viene caricato e rilasciato nel subprocess, senza occupare RAM/VRAM del servizio long-running.
+- **Isolamento della memoria**: il modello BGE-M3 in modalità indexing viene caricato e rilasciato nel subprocess, senza occupare la RAM del servizio long-running.
 - **Isolamento dei fallimenti**: un crash durante l'indicizzazione non abbatte l'ingestion service; lo stato del job riflette l'errore (`status=error` con coda dei log).
 - **Configurazione puntuale**: l'indicizzazione avviene sempre contro lo staging appena attivato, indipendentemente dalla configurazione del servizio.
 
@@ -729,8 +730,6 @@ Tutta la configurazione del backend è centralizzata in `AppConfig` ([esperto/co
 | Variabile | Default | Vincoli | Descrizione |
 |---|---|---|---|
 | `DENSE_MODEL_NAME` | `BAAI/bge-m3` | — | Identificativo HuggingFace del modello |
-| `BGE_M3_DEVICE` | obbligatoria | `cuda` / `cpu` | Device per l'indicizzazione (le query usano CPU) |
-| `BGE_M3_USE_FP16` | obbligatoria | bool | Half precision su GPU |
 | `EMBEDDING_MAX_LENGTH` | obbligatoria | 128–8192 | Lunghezza massima in token per encoding (tipicamente 1024) |
 | `BATCH_SIZE` | obbligatoria | 1–128 | Batch size dell'encoding in indicizzazione (tipicamente 8) |
 
@@ -833,7 +832,7 @@ Le limitazioni di sicurezza sono elencate in [§16](#16-limitazioni-note).
 
 ## 14. Testing
 
-- **Unit test** (`esperto/tests/`, `benchmark/tests/`): `python -m pytest tests/ -v` dalla cartella del servizio. Nessuna dipendenza da Ollama o Qdrant: l'ambiente minimo è impostato nei rispettivi `conftest.py`.
+- **Unit test** (`esperto/tests/`, `benchmark/tests/`): `python -m pytest tests/ -v` dalla cartella del servizio (per `esperto`: `pip install -r requirements-dev.txt`). Nessuna dipendenza da Ollama o Qdrant: l'ambiente minimo è impostato nei rispettivi `conftest.py`.
 - **Benchmark** (`benchmark/`, porta 5002, profilo compose `benchmark`): indicizza un repository a commit fissato, interroga `esperto` su un gold set (`datasets/<nome>/questions.yaml`) e produce in `benchmark_results/<run_id>/` metriche di retrieval, generazione e latenza con intervalli bootstrap. Endpoint, parametri e file prodotti sono in [§9.4](#94-benchmark--benchmark-5002).
   - **Ablation**: ogni configurazione disattiva un singolo stadio tramite `RetrievalOptions`.
   - **Campione stratificato**: 4 domande per categoria di default (`per_category`, `seed`), estratte in modo riproducibile.

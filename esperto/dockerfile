@@ -7,11 +7,8 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Installiamo le dipendenze di sistema minime
-# 'build-essential' serve se alcune librerie devono compilare estensioni in C
-# 'curl' è utile per i futuri healthcheck del container
+# 'curl' serve agli healthcheck del container; tutte le dipendenze Python hanno wheel precompilate
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

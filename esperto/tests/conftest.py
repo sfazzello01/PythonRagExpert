@@ -29,8 +29,6 @@ _DEFAULT_ENV = {
     "QDRANT_QUERY_TIMEOUT": "30",
     "LLM_INFERENCE_TIMEOUT": "300",
     "BASE_DIR": "/tmp/esperto-test-base",
-    "BGE_M3_DEVICE": "cpu",
-    "BGE_M3_USE_FP16": "false",
     "BATCH_SIZE": "4",
     "INDEX_STATE_DIR": "/tmp/esperto-test-state",
     "SUPPORTED_EXTENSIONS": ".py,.yaml,.yml,.md,.txt,.html,.json,.js",

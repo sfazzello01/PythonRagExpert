@@ -67,13 +67,6 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
   esperto_indexer:
     profiles: ["esperto"]
@@ -102,13 +95,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
   frontend_esperto:
     profiles: ["esperto"]

@@ -27,8 +27,6 @@ class AppConfig(BaseModel):
     qdrant_query_timeout: float = Field(ge=5.0)
     llm_inference_timeout: float = Field(ge=10.0)
     base_dir: Path
-    bge_m3_device: str
-    bge_m3_use_fp16: bool
     batch_size: int = Field(ge=1, le=128)
     index_state_dir: Path
     dense_model_name: str = "BAAI/bge-m3"
@@ -82,8 +80,6 @@ QDRANT_QUERY_TIMEOUT = config.qdrant_query_timeout
 LLM_INFERENCE_TIMEOUT = config.llm_inference_timeout
 
 BASE_DIR = config.base_dir
-BGE_M3_DEVICE = config.bge_m3_device
-BGE_M3_USE_FP16 = config.bge_m3_use_fp16
 BATCH_SIZE = config.batch_size
 INDEX_STATE_DIR = config.index_state_dir
 DENSE_MODEL_NAME = config.dense_model_name

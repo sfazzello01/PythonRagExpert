@@ -23,6 +23,7 @@ rerank ColBERT MaxSim) → dedup per `chunk_id` → espansione via symbol graph
 
 ```bash
 cd esperto
+pip install -r requirements-dev.txt
 python -m pytest tests/ -v
 ```
 

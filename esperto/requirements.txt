@@ -1,7 +1,7 @@
---extra-index-url https://download.pytorch.org/whl/cu124
-
-torch==2.6.0+cu124
-FlagEmbedding==1.4.0
+onnxruntime==1.23.2
+tokenizers==0.23.2
+huggingface_hub==1.33.0
+numpy==2.2.6
 langchain-core==1.5.3
 langchain-ollama==1.1.0
 langchain-text-splitters==1.1.2
@@ -10,4 +10,3 @@ fastapi==0.141.1
 pydantic==2.13.4
 uvicorn==0.52.1
 python-multipart==0.0.32
-pytest==8.3.4
