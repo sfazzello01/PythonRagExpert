@@ -8,6 +8,7 @@ import time
 from langchain_core.documents import Document
 
 from ..services.embedding import encode_documents, load_indexing_model
+from ..services.embedding_cache import EmbeddingCache
 from ..services.index_state import is_current, save, source_fingerprint
 from ..services.qdrant import (
     activate_collection,
@@ -73,6 +74,9 @@ def build_index() -> None:
     graph = build_symbol_graph(source_files)
     documents = _chunk_sources(source_files)
     relations = chunk_relations(graph)
+    # Batch di chunk di lunghezza simile: ogni batch e' allungato fino al suo testo piu' lungo.
+    documents.sort(key=lambda document: len(document.page_content))
+    cache = EmbeddingCache()
     logger.info("Avvio indicizzazione ibrida di %d chunk semantici.", len(documents))
 
     for start in range(0, len(documents), BATCH_SIZE):
@@ -80,7 +84,7 @@ def build_index() -> None:
         batch_start_time = time.time()
         # L'intestazione con le relazioni e' aggiunta dopo l'encoding: i nomi dei simboli
         # chiamati, nel testo indicizzato, farebbero somigliare un chunk alle domande su di essi.
-        encoded = encode_documents(model, batch)
+        encoded = encode_documents(model, batch, cache)
         _add_relation_headers(batch, relations)
         upsert_encoded_documents(client, collection, batch, encoded)
         logger.info(

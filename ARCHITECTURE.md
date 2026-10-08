@@ -49,7 +49,7 @@
 | Vector database | Qdrant | v1.19.1 (server) / 1.19.0 (client) |
 | LLM runtime | Ollama | 0.33.3 |
 | Embedding model | BGE-M3 (BAAI/bge-m3), tokenizer `tokenizers` | 0.23.2 |
-| Inferenza embedding | ONNX Runtime (CPU), per query e indexing | 1.23.2 |
+| Inferenza embedding | ONNX Runtime (CPU) con provider OpenVINO su CPU Intel, per query e indexing | 1.23.0 |
 | Frontend | Jinja2 + HTML/JS (no framework) | 3.1.6 |
 | Container | Docker + docker-compose | — |
 
@@ -193,6 +193,7 @@ esperto/
     │   ├── services/            # integrazione servizi esterni
     │   │   ├── qdrant.py        #   client sync/async, create_hybrid_collection(), activate_collection(), hybrid_search(), upsert_encoded_documents()
     │   │   ├── embedding.py     #   ciclo di vita BGE-M3: load_indexing_model(), get_query_model(), encode_*()
+    │   │   ├── embedding_cache.py #  cache SQLite dei vettori dei chunk, per hash del testo codificato
     │   │   ├── index_state.py   #   fingerprint e stato: source_fingerprint(), is_current(), save()
     │   │   └── symbol_graph.py  #   SymbolGraph runtime: related_chunks() via BFS + PageRank, chunks_named()
     │   └── shared/
@@ -356,7 +357,7 @@ Il grafo è costruito prima del chunking, perché le sue relazioni finiscono nel
 
 ### 5.7 Encoding e upsert
 
-I documenti sono processati in batch (`BATCH_SIZE`, tipicamente 8): `encode_documents()` invoca BGE-M3 ottenendo per ogni chunk due rappresentazioni (`dense_vecs`, `lexical_weights`), quindi `upsert_encoded_documents()` costruisce i `PointStruct` con ID deterministico `uuid5(NAMESPACE_URL, "esperto:{chunk_id}")` e li carica sulla collection. Gli upsert falliti per dimensione eccessiva ricadono su inserimenti individuali.
+I documenti sono ordinati per lunghezza (batch di testi simili, quindi poco padding) e processati in batch (`BATCH_SIZE`, tipicamente 8): `encode_documents()` riusa dalla cache `embedding_cache.sqlite` i vettori dei chunk il cui testo è già stato codificato e invoca BGE-M3 solo sugli altri, ottenendo per ogni chunk due rappresentazioni (`dense_vecs`, `lexical_weights`), quindi `upsert_encoded_documents()` costruisce i `PointStruct` con ID deterministico `uuid5(NAMESPACE_URL, "esperto:{chunk_id}")` e li carica sulla collection. Gli upsert falliti per dimensione eccessiva ricadono su inserimenti individuali.
 
 Al termine: `save()` scrive `index_state.json` (collection, fingerprint, numero file, versione grafo) e tocca il flag `index_complete`, che sblocca l'health check del servizio di query.
 
@@ -730,6 +731,7 @@ Tutta la configurazione del backend è centralizzata in `AppConfig` ([esperto/co
 | Variabile | Default | Vincoli | Descrizione |
 |---|---|---|---|
 | `DENSE_MODEL_NAME` | `BAAI/bge-m3` | — | Identificativo HuggingFace del modello |
+| `EMBEDDING_INT8` | `false` | bool | Modello quantizzato a 8 bit sul provider CPU standard (creato al primo avvio); i vettori cambiano, quindi richiede una reindicizzazione |
 | `EMBEDDING_MAX_LENGTH` | obbligatoria | 128–8192 | Lunghezza massima in token per encoding (tipicamente 1024) |
 | `BATCH_SIZE` | obbligatoria | 1–128 | Batch size dell'encoding in indicizzazione (tipicamente 8) |
 
@@ -797,6 +799,7 @@ Il servizio di benchmark legge lo stesso `.env` (per registrare i parametri RAG 
 | `index_jobs.json` | `{job_id, filename, status, files, started_at, finished_at, error, indexing_seconds}` | Stato dell'ultimo job di upload (`queued`/`indexing`/`ready`/`error`) |
 | `symbol_graph.json` | `{version, nodes[], edges[]}` | Grafo statico dei simboli per l'espansione a runtime |
 | `repo_map.txt` | testo | Mappa del repository inserita nel prompt e passata al planner |
+| `embedding_cache.sqlite` | SQLite | Vettori dense e sparse già calcolati, per hash di modello, lunghezza massima e testo del chunk |
 
 ### 12.3 Workspace (`esperto_workspace/`)
 

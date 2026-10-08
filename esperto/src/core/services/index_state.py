@@ -10,8 +10,8 @@ from config import (
     BASE_DIR,
     CHUNKING_VERSION,
     DENSE_DIMENSION,
-    DENSE_MODEL_NAME,
     EMBEDDING_MAX_LENGTH,
+    EMBEDDING_MODEL_ID,
     INDEX_COMPLETE_FILE,
     INDEX_STATE_DIR,
     INDEX_STATE_FILE,
@@ -26,7 +26,7 @@ def source_fingerprint(files: list[Path]) -> str:
     """Return a stable fingerprint of indexed files and embedding schema settings."""
     digest = hashlib.sha256()
     digest.update(
-        f"{DENSE_MODEL_NAME}:{DENSE_DIMENSION}:{EMBEDDING_MAX_LENGTH}:{CHUNKING_VERSION}".encode("utf-8")
+        f"{EMBEDDING_MODEL_ID}:{DENSE_DIMENSION}:{EMBEDDING_MAX_LENGTH}:{CHUNKING_VERSION}".encode("utf-8")
     )
     for path in files:
         try:

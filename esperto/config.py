@@ -30,6 +30,8 @@ class AppConfig(BaseModel):
     batch_size: int = Field(ge=1, le=128)
     index_state_dir: Path
     dense_model_name: str = "BAAI/bge-m3"
+    # True: modello quantizzato a 8 bit (piu' veloce senza OpenVINO, vettori leggermente diversi).
+    embedding_int8: bool = False
     symbol_graph_max_neighbors: int = Field(default=6, ge=1)
     symbol_graph_max_depth: int = Field(default=3, ge=0)
     symbol_graph_pagerank_damping: float = Field(default=0.4, gt=0.0, lt=1.0)
@@ -83,6 +85,9 @@ BASE_DIR = config.base_dir
 BATCH_SIZE = config.batch_size
 INDEX_STATE_DIR = config.index_state_dir
 DENSE_MODEL_NAME = config.dense_model_name
+EMBEDDING_INT8 = config.embedding_int8
+# Identifica i vettori prodotti: entra nell'impronta dell'indice e nella chiave della cache.
+EMBEDDING_MODEL_ID = f"{DENSE_MODEL_NAME}:int8" if EMBEDDING_INT8 else DENSE_MODEL_NAME
 SYMBOL_GRAPH_MAX_NEIGHBORS = config.symbol_graph_max_neighbors
 SYMBOL_GRAPH_MAX_DEPTH = config.symbol_graph_max_depth
 SYMBOL_GRAPH_PAGERANK_DAMPING = config.symbol_graph_pagerank_damping
@@ -101,6 +106,7 @@ INDEX_STATE_FILE = INDEX_STATE_DIR / "index_state.json"
 INDEX_COMPLETE_FILE = INDEX_STATE_DIR / "index_complete"
 SYMBOL_GRAPH_FILE = INDEX_STATE_DIR / "symbol_graph.json"
 REPO_MAP_FILE = INDEX_STATE_DIR / "repo_map.txt"
+EMBEDDING_CACHE_FILE = INDEX_STATE_DIR / "embedding_cache.sqlite"
 
 SUPPORTED_EXTENSIONS = config.supported_extensions
 SKIP_DIRS = config.skip_dirs

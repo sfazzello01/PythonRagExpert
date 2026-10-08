@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import logging
+import os
 import pickle
+import shutil
+import tempfile
 import threading
 import zipfile
 from collections import OrderedDict
+from pathlib import Path
 from typing import Callable, Sequence
 
 import numpy as np
 import onnxruntime  # type: ignore
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import constants, hf_hub_download, snapshot_download
 from langchain_core.documents import Document
 from tokenizers import Tokenizer
 
-from config import DENSE_MODEL_NAME, EMBEDDING_MAX_LENGTH
+from config import DENSE_MODEL_NAME, EMBEDDING_INT8, EMBEDDING_MAX_LENGTH
 from ..shared.vectors import QueryVectors, lexical_weights_to_sparse_vector
+from .embedding_cache import EmbeddingCache
 
 logger = logging.getLogger("EspertoEmbedding")
 
@@ -79,11 +84,50 @@ _query_model: BGEM3Encoder | None = None
 _query_model_lock = threading.Lock()
 
 
+def _quantized_model(model_dir: Path) -> Path:
+    """Return the int8 copy of the ONNX model, created next to the HuggingFace cache on first use."""
+    target = Path(constants.HF_HOME) / f"{DENSE_MODEL_NAME.replace('/', '--')}-int8.onnx"
+    if not target.exists():
+        from onnxruntime.quantization import QuantType, quantize_dynamic  # type: ignore
+
+        logger.info("Quantizzazione int8 di BGE-M3 (solo al primo avvio).")
+        with tempfile.TemporaryDirectory(dir=target.parent) as work:
+            # onnx rifiuta i link della cache HuggingFace: la quantizzazione lavora su una copia.
+            shutil.copytree(model_dir, f"{work}/onnx")
+            quantize_dynamic(
+                f"{work}/onnx/model.onnx", f"{work}/int8.onnx", weight_type=QuantType.QInt8, per_channel=True
+            )
+            os.replace(f"{work}/int8.onnx", target)
+    return target
+
+
+def _execution_providers() -> list[str]:
+    """OpenVINO on Intel CPUs when the runtime ships it, the default CPU provider otherwise."""
+    try:
+        intel_cpu = "GenuineIntel" in Path("/proc/cpuinfo").read_text()
+    except OSError:
+        intel_cpu = False
+    # Il modello int8 resta sul provider CPU: con OpenVINO e' piu' lento del modello originale.
+    if intel_cpu and not EMBEDDING_INT8 and "OpenVINOExecutionProvider" in onnxruntime.get_available_providers():
+        return ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
 def load_indexing_model() -> BGEM3Encoder:
     """Create the BGE-M3 model (ONNX Runtime, CPU) used by the one-shot indexing process."""
-    logger.info("Caricamento BGE-M3 su CPU con ONNX Runtime (%s).", DENSE_MODEL_NAME)
-    model_dir = snapshot_download(DENSE_MODEL_NAME, allow_patterns=["onnx/*"])
-    session = onnxruntime.InferenceSession(f"{model_dir}/onnx/model.onnx", providers=["CPUExecutionProvider"])
+    model_dir = Path(snapshot_download(DENSE_MODEL_NAME, allow_patterns=["onnx/*"])) / "onnx"
+    model_file = str(_quantized_model(model_dir) if EMBEDDING_INT8 else model_dir / "model.onnx")
+    providers = _execution_providers()
+    try:
+        session = onnxruntime.InferenceSession(model_file, providers=providers)
+    except Exception as error:
+        if providers == ["CPUExecutionProvider"]:
+            raise
+        logger.warning("Provider %s non utilizzabile (%s): uso il provider CPU.", providers[0], error)
+        session = onnxruntime.InferenceSession(model_file, providers=["CPUExecutionProvider"])
+    logger.info(
+        "BGE-M3 caricato (%s, int8=%s, provider=%s).", DENSE_MODEL_NAME, EMBEDDING_INT8, session.get_providers()[0]
+    )
     return BGEM3Encoder(
         lambda input_ids, attention_mask: session.run(
             ["token_embeddings"], {"input_ids": input_ids, "attention_mask": attention_mask}
@@ -100,9 +144,21 @@ def get_query_model() -> BGEM3Encoder:
     return _query_model
 
 
-def encode_documents(model: BGEM3Encoder, documents: Sequence[Document]) -> dict:
-    """Encode an indexing batch with the dense and sparse BGE-M3 representations."""
-    return model.encode([document.page_content for document in documents])
+def encode_documents(model: BGEM3Encoder, documents: Sequence[Document], cache: EmbeddingCache) -> dict:
+    """Encode an indexing batch with the dense and sparse BGE-M3 representations, reusing cached vectors."""
+    texts = [document.page_content for document in documents]
+    vectors = cache.get(texts)
+    missing = [index for index, cached in enumerate(vectors) if cached is None]
+    if missing:
+        output = model.encode([texts[index] for index in missing])
+        encoded = list(zip(output["dense_vecs"], output["lexical_weights"]))
+        cache.put([texts[index] for index in missing], encoded)
+        for index, fresh in zip(missing, encoded):
+            vectors[index] = fresh
+    return {
+        "dense_vecs": [dense for dense, _ in vectors],
+        "lexical_weights": [lexical for _, lexical in vectors],
+    }
 
 
 def encode_queries(texts: Sequence[str]) -> list[QueryVectors]:
