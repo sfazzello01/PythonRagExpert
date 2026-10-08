@@ -18,6 +18,8 @@ logger = logging.getLogger("EspertoSymbolGraph")
 
 # Chiamate elencate al massimo nell'intestazione di un chunk.
 MAX_HEADER_CALLS = 8
+# Riesportazioni seguite al massimo per arrivare alla definizione di un nome importato.
+MAX_REEXPORTS = 5
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,15 @@ def _module_name(path: Path) -> str:
     return relative.replace("/", ".")
 
 
+def _import_module(current: str, is_package: bool, module: str | None, level: int) -> str:
+    """Absolute name of the module named by a (possibly relative) `from ... import`."""
+    if not level:
+        return module or ""
+    package = current.split(".") if is_package else current.split(".")[:-1]
+    parent = package[: max(0, len(package) - level + 1)]
+    return ".".join((*parent, *(module.split(".") if module else ())))
+
+
 def _attribute_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -62,10 +73,12 @@ def _attribute_name(node: ast.AST) -> str | None:
 
 
 class _GraphVisitor(ast.NodeVisitor):
-    def __init__(self, filename: str, module: str, definitions: set[str]):
+    def __init__(self, filename: str, module: str, is_package: bool, definitions: set[str], aliases: dict[str, str]):
         self.filename = filename
         self.module = module
+        self.is_package = is_package
         self.definitions = definitions
+        self.aliases = aliases
         self.nodes: list[SymbolNode] = []
         self.edges: list[SymbolEdge] = []
         self.scope: list[str] = []
@@ -133,6 +146,8 @@ class _GraphVisitor(ast.NodeVisitor):
             self.split_classes.add(node.name)
         class_id = self._add_symbol(node, "class", node.name)
         for base in node.bases:
+            if isinstance(base, ast.Subscript):  # base generica: Engine[PostgresTransaction]
+                base = base.value
             target = self._resolve_reference(_attribute_name(base))
             if target:
                 self.edges.append(SymbolEdge(class_id, target, "inherits", node.lineno))
@@ -148,7 +163,7 @@ class _GraphVisitor(ast.NodeVisitor):
                 self.edges.append(SymbolEdge(self.current_id, alias.name, "imports", node.lineno))
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        module = self._resolve_import_module(node.module, node.level)
+        module = _import_module(self.module, self.is_package, node.module, node.level)
         for alias in node.names:
             local_name = alias.asname or alias.name
             target = f"{module}::{alias.name}" if module else alias.name
@@ -163,12 +178,17 @@ class _GraphVisitor(ast.NodeVisitor):
             self.edges.append(SymbolEdge(self.current_id, target, "calls", node.lineno))
         self.generic_visit(node)
 
-    def _resolve_import_module(self, module: str | None, level: int) -> str:
-        if not level:
-            return module or ""
-        package = self.module.split(".")[:-1]
-        parent = package[: max(0, len(package) - level + 1)]
-        return ".".join((*parent, *(module.split(".") if module else ())))
+    def _definition(self, candidate: str) -> str | None:
+        """Return the candidate if it is defined, following re-exports (e.g. via `__init__.py`)."""
+        for _ in range(MAX_REEXPORTS):
+            if candidate in self.definitions:
+                return candidate
+            parts = candidate.split("::")
+            target = self.aliases.get("::".join(parts[:2]))
+            if not target:
+                return None
+            candidate = "::".join((target, *parts[2:]))
+        return None
 
     def _resolve_reference(self, reference: str | None) -> str | None:
         if not reference:
@@ -178,22 +198,31 @@ class _GraphVisitor(ast.NodeVisitor):
             class_name = next((name for name in reversed(self.scope[:-1])), None)
             if class_name:
                 candidate = f"{self.module}::{class_name}::{parts[-1]}"
-                return candidate if candidate in self.definitions else None
+                return self._definition(candidate)
         imported = self.imports.get(parts[0])
         if imported:
             candidate = "::".join((imported, *parts[1:])) if len(parts) > 1 else imported
-            return candidate if candidate in self.definitions else None
+            return self._definition(candidate)
         candidate = "::".join((self.module, *parts))
-        return candidate if candidate in self.definitions else None
+        return self._definition(candidate)
 
 
 class _DefinitionVisitor(ast.NodeVisitor):
-    """Collect fully-qualified definition IDs before resolving graph edges."""
+    """Collect fully-qualified definition IDs and module-level re-exports before resolving graph edges."""
 
-    def __init__(self, module: str):
+    def __init__(self, module: str, is_package: bool):
         self.module = module
+        self.is_package = is_package
         self.scope: list[str] = []
         self.definitions = {module}
+        # "modulo::nome" -> "modulo di origine::nome" per i nomi importati a livello di modulo.
+        self.aliases: dict[str, str] = {}
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        origin = _import_module(self.module, self.is_package, node.module, node.level)
+        if origin and not self.scope:
+            for alias in node.names:
+                self.aliases[f"{self.module}::{alias.asname or alias.name}"] = f"{origin}::{alias.name}"
 
     def _visit_definition(self, node: ast.AST, name: str) -> None:
         self.definitions.add("::".join((self.module, *self.scope, name)))
@@ -227,14 +256,18 @@ def build_symbol_graph(files: list[Path]) -> dict:
     trees = _parse(files)
     # Primo passaggio: tutte le definizioni, necessarie per risolvere chiamate tra moduli.
     definitions: set[str] = set()
+    aliases: dict[str, str] = {}
     for path, tree in trees.items():
-        definition_visitor = _DefinitionVisitor(_module_name(path))
+        definition_visitor = _DefinitionVisitor(_module_name(path), path.name == "__init__.py")
         definition_visitor.visit(tree)
         definitions.update(definition_visitor.definitions)
+        aliases.update(definition_visitor.aliases)
     nodes: list[SymbolNode] = []
     edges: list[SymbolEdge] = []
     for path, tree in trees.items():
-        visitor = _GraphVisitor(relative_path(path), _module_name(path), definitions)
+        visitor = _GraphVisitor(
+            relative_path(path), _module_name(path), path.name == "__init__.py", definitions, aliases
+        )
         visitor.visit(tree)
         nodes.extend(visitor.nodes)
         edges.extend(visitor.edges)

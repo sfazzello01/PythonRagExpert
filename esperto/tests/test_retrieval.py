@@ -67,9 +67,9 @@ def _retrieve(options=RetrievalOptions(), questions=("sotto-domanda",), related=
     client = FakeClient()
     retriever = retrieval.HybridRetriever(client)
 
-    def related_chunks(chunk_ids, limit):
+    def related_chunks(chunk_ids, limit, top_chunk_ids):
         if seeds is not None:
-            seeds.append(set(chunk_ids))
+            seeds.append((set(chunk_ids), list(top_chunk_ids)))
         return related or {}
 
     retriever._symbol_graph = SimpleNamespace(related_chunks=related_chunks, chunks_named=lambda text: list(named))
@@ -147,5 +147,19 @@ def test_symbol_lookup_can_be_disabled(encoded):
 def test_graph_starts_from_search_results_and_named_symbols_only(encoded):
     seeds = []
     _retrieve(questions=(), named=["noise"], seeds=seeds)
-    # "low" entra come chunk dello stesso file di "top": non e' un seme.
-    assert seeds == [{"top", "mid", "noise"}]
+    # "low" entra come chunk dello stesso file di "top": non e' un seme. I vicini diretti dei
+    # primi risultati (simboli nominati, poi la ricerca in ordine) hanno la precedenza.
+    assert seeds == [({"top", "mid", "noise"}, ["noise", "top", "mid"])]
+
+
+def test_budget_counts_module_imports_once_per_file():
+    from langchain_core.documents import Document
+
+    imports = "--- IMPORTS DI CONTESTO ---\n" + "import x\n" * 10
+    documents = [
+        Document(page_content=f"{imports}--- CODICE SORGENTE ---\ndef f{index}(): ...", metadata={"filename": "a.py"})
+        for index in range(3)
+    ]
+    size = len(documents[0].page_content)
+    # Tre chunk interi non entrerebbero: il secondo e il terzo contano senza il blocco degli import.
+    assert len(retrieval._apply_context_budget(documents, 10, size * 2)) == 3

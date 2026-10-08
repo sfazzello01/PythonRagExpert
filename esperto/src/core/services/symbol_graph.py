@@ -7,6 +7,7 @@ import logging
 import re
 from collections import defaultdict, deque
 from pathlib import Path
+from typing import Sequence
 
 from config import (
     SYMBOL_GRAPH_FILE,
@@ -51,12 +52,13 @@ class SymbolGraph:
                     chunk_ids.update(dict.fromkeys(sorted(matches)))
         return list(chunk_ids)
 
-    def related_chunks(self, chunk_ids: set[str], limit: int) -> dict[str, str]:
+    def related_chunks(self, chunk_ids: set[str], limit: int, top_chunk_ids: Sequence[str] = ()) -> dict[str, str]:
         """Return graph-related chunks ranked by Personalized PageRank.
 
         I candidati sono raccolti con BFS bidirezionale entro la profondità
         configurata; il ranking usa PPR sulla sola adiacenza diretta
         (calls/inherits, source -> target). I chunk seed sono esclusi.
+        I vicini a un passo di `top_chunk_ids` precedono tutti gli altri.
         """
         self._reload_if_needed()
         seed_symbols = {
@@ -82,11 +84,23 @@ class SymbolGraph:
             if previous is None or score > previous[0]:
                 best_by_chunk[chunk_id] = (score, relation)
 
+        # I vicini diretti dei primi risultati completano le catene di chiamate: vengono prima,
+        # e tra loro prima quelli nello stesso scope (classe o modulo) del risultato.
+        priority: dict[str | None, int] = {}
+        for chunk_id in top_chunk_ids:
+            for symbol_id in self._chunk_to_symbols.get(chunk_id, ()):
+                scope = symbol_id.rpartition("::")[0]
+                for neighbor_id, _ in self._neighbors.get(symbol_id, []):
+                    neighbor_chunk = self._chunk_for_symbol(neighbor_id)
+                    tier = 0 if neighbor_id.rpartition("::")[0] == scope else 1
+                    priority[neighbor_chunk] = min(tier, priority.get(neighbor_chunk, tier))
+
         # A parita' di score (es. i chiamanti, che il PPR diretto non raggiunge)
         # vince il percorso piu' corto dai seed.
         ordered = sorted(
             best_by_chunk,
             key=lambda chunk_id: (
+                priority.get(chunk_id, 2),
                 -best_by_chunk[chunk_id][0],
                 best_by_chunk[chunk_id][1].count("->"),
                 chunk_id,

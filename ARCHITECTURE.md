@@ -1,7 +1,7 @@
 # ARCHITECTURE.md — Sistema "Esperto di Codebase"
 
 > Documento di architettura del sistema RAG (Retrieval-Augmented Generation) per l'interrogazione di codebase Python.
-> Ultimo aggiornamento: 2026-10-04.
+> Ultimo aggiornamento: 2026-10-08.
 
 ## Indice
 
@@ -20,7 +20,7 @@
 13. [Sicurezza](#13-sicurezza)
 14. [Testing](#14-testing)
 15. [Decisioni architetturali](#15-decisioni-architetturali)
-16. [Limitazioni note e sviluppi futuri](#16-limitazioni-note-e-sviluppi-futuri)
+16. [Limitazioni note](#16-limitazioni-note)
 
 ---
 
@@ -183,7 +183,7 @@ esperto/
     │   │   ├── discovery.py     #   discovery file: iter_source_files(), relative_path(), service_for_path()
     │   │   ├── chunking.py      #   PythonASTContextualChunker + fallback_text_split()
     │   │   ├── symbol_graph.py  #   grafo statico: build_symbol_graph(), chunk_relations(), save_symbol_graph()
-    │   │   └── repo_map.py      #   mappa del repository per il prompt: build_repo_map(), save_repo_map()
+    │   │   └── repo_map.py      #   mappa del repository per planner e prompt: build_repo_map(), save_repo_map()
     │   ├── rag/                 # pipeline di interrogazione
     │   │   ├── chain.py         #   stream_expert_response(): composizione retriever + LLM
     │   │   ├── retrieval.py     #   HybridRetriever.retrieve(): candidati, rerank finale, budget
@@ -197,12 +197,12 @@ esperto/
     │   └── shared/
     │       ├── options.py       #   RetrievalOptions: interruttori per richiesta (ablation)
     │       ├── vectors.py       #   QueryVectors, lexical_weights_to_sparse_vector()
-    │       └── text.py          #   sanitize_text()
+    │       └── text.py          #   sanitize_text(), without_imports()
     ├── ingestion/               # servizio di ingestion (:5001)
     │   ├── api.py               #   POST /upload, GET /status, GET /health
     │   ├── workspace.py         #   job in background, staging, attivazione atomica, subprocess
     │   └── zip_validation.py    #   validate_zip(): magic bytes, path traversal, integrità
-    └── tests/                   # pytest: chunking, planner, repo_map, retrieval, symbol_graph, zip_validation
+    └── tests/                   # pytest: chain, chunking, planner, repo_map, retrieval, symbol_graph, zip_validation
 ```
 
 ### 4.2 Frontend `frontend_esperto/`
@@ -257,7 +257,7 @@ benchmark/
 | [esperto/src/core/indexing/chunking.py](esperto/src/core/indexing/chunking.py) | `PythonASTContextualChunker`, `fallback_text_split()` | Chunking semantico Python + fallback testuale |
 | [esperto/src/core/indexing/discovery.py](esperto/src/core/indexing/discovery.py) | `iter_source_files()`, `relative_path()` | Scoperta dei file sorgente con filtri |
 | [esperto/src/core/indexing/symbol_graph.py](esperto/src/core/indexing/symbol_graph.py) | `build_symbol_graph()`, `chunk_relations()`, `save_symbol_graph()` | Grafo statico di simboli/relazioni via AST; relazioni per chunk da scrivere nell'intestazione |
-| [esperto/src/core/indexing/repo_map.py](esperto/src/core/indexing/repo_map.py) | `build_repo_map()`, `save_repo_map()` | Mappa del repository (README, file, simboli) per planner e prompt |
+| [esperto/src/core/indexing/repo_map.py](esperto/src/core/indexing/repo_map.py) | `build_repo_map()`, `save_repo_map()` | Mappa del repository (README, cartelle, gerarchia delle classi) per planner e prompt |
 | [esperto/src/core/rag/chain.py](esperto/src/core/rag/chain.py) | `stream_expert_response()` | Composizione retrieval → prompt → streaming LLM |
 | [esperto/src/core/rag/retrieval.py](esperto/src/core/rag/retrieval.py) | `HybridRetriever.retrieve()` | Candidati per domanda, rerank finale, quota del grafo, budget contesto |
 | [esperto/src/core/rag/planner.py](esperto/src/core/rag/planner.py) | `plan_subquestions()`, `parse_subquestions()` | Decomposizione LLM della domanda |
@@ -337,21 +337,21 @@ L'indicizzazione vera e propria non gira nel processo dell'ingestion service ma 
 
 Definito in [chunking.py](esperto/src/core/indexing/chunking.py):
 
-- **File Python** — `PythonASTContextualChunker`: parsing con `ast.parse()`, estrazione delle definizioni top-level (funzioni e classi, decoratori inclusi) come chunk singoli; le classi oltre `CLASS_SPLIT_MIN_LINES=400` righe sono divise in un chunk di intestazione (firma, docstring, attributi) più un chunk `method` per metodo, con `symbol_name` nella forma `Classe.metodo`. Ogni chunk è arricchito con gli **import di contesto** del modulo e metadati ricchi (`filename`, `service`, `chunk_type`, `symbol_name`, `start_line`, `end_line`, `chunk_id`). Il corpo globale del modulo (codice fuori da definizioni) è preservato come chunk `global_body`. In caso di `SyntaxError` si ricade automaticamente sul fallback testuale.
+- **File Python** — `PythonASTContextualChunker`: parsing con `ast.parse()`, estrazione delle definizioni top-level (funzioni e classi, decoratori inclusi) come chunk singoli; le classi oltre `CLASS_SPLIT_MIN_LINES=400` righe sono divise in un chunk di intestazione (firma, docstring, attributi e le firme di tutti i metodi, senza corpo) più un chunk `method` per metodo, con `symbol_name` nella forma `Classe.metodo`. Ogni chunk è arricchito con gli **import di contesto** del modulo e metadati ricchi (`filename`, `service`, `chunk_type`, `symbol_name`, `start_line`, `end_line`, `chunk_id`). Il corpo globale del modulo (codice fuori da definizioni) è preservato come chunk `global_body`. In caso di `SyntaxError` si ricade automaticamente sul fallback testuale.
 - **Altri formati** — `fallback_text_split()`: `RecursiveCharacterTextSplitter` con `INDEX_CHUNK_SIZE=1200` caratteri e `INDEX_CHUNK_OVERLAP=150`, chunk marcati `text_block` con suffisso `part_N`.
 
-**Intestazione strutturale.** Dopo l'encoding e prima dell'upsert `_add_relation_headers()` in [pipeline.py](esperto/src/core/indexing/pipeline.py) antepone a ogni chunk di simbolo le righe `# EREDITA DA: ...` e `# CHIAMA: ...`, ricavate dal symbol graph con `chunk_relations()` (al più `MAX_HEADER_CALLS=8` chiamate, escluse quelle interne allo stesso chunk; i metodi di una classe spezzata riportano le basi della classe). La struttura entra così nel testo salvato e letto dal modello, anche quando il simbolo collegato non viene recuperato, ma non nei vettori: indicizzata, farebbe somigliare un chunk alle domande sui simboli che chiama (misurato: contesto meno completo per la ricerca densa). Un cambio al formato dei chunk richiede di incrementare `CHUNKING_VERSION`, che invalida gli indici esistenti.
+**Intestazione strutturale.** Dopo l'encoding e prima dell'upsert `_add_relation_headers()` in [pipeline.py](esperto/src/core/indexing/pipeline.py) antepone a ogni chunk di simbolo le righe `# EREDITA DA: ...` e `# CHIAMA: ...`, ricavate dal symbol graph con `chunk_relations()` (al più `MAX_HEADER_CALLS=8` chiamate, escluse quelle interne allo stesso chunk; i metodi di una classe spezzata riportano le basi della classe). L'intestazione fa parte del testo salvato e letto dal modello, non di quello da cui si calcolano i vettori. `CHUNKING_VERSION` entra nel fingerprint dell'indice: incrementarla invalida gli indici esistenti.
 
-Il `chunk_id` è deterministico e dipende dal tipo di chunk: per i simboli Python `MD5(filename::symbol_name::riga_def-1::end_line)`, per i blocchi testuali `MD5(filename::part_N)`. Questo rende i punti Qdrant ricostruibili in modo stabile a ogni re-indicizzazione.
+Il `chunk_id` è deterministico ([§7.3](#73-identificatori-deterministici)).
 
 ### 5.6 Costruzione del symbol graph
 
 `build_symbol_graph()` in [indexing/symbol_graph.py](esperto/src/core/indexing/symbol_graph.py) esegue un'analisi **statica** dei file Python con due visitor AST:
 
-- `_DefinitionVisitor`: raccoglie gli identificatori fully-qualified di moduli, classi, funzioni e metodi (nodi del grafo), ciascuno collegato al proprio `chunk_id`.
-- `_GraphVisitor`: estrae gli archi tipizzati — `calls` (chiamate tra simboli), `inherits` (ereditarietà), `imports` — con la riga di origine.
+- `_DefinitionVisitor`: raccoglie gli identificatori fully-qualified di moduli, classi, funzioni e metodi (nodi del grafo), ciascuno collegato al proprio `chunk_id`. Raccoglie anche i nomi che ogni modulo importa a livello di modulo: servono a seguire le riesportazioni (tipicamente in `__init__.py`) fino alla definizione, per al più `MAX_REEXPORTS=5` passaggi.
+- `_GraphVisitor`: estrae gli archi tipizzati — `calls` (chiamate tra simboli), `inherits` (ereditarietà, anche da basi generiche come `Engine[T]`), `imports` — con la riga di origine.
 
-Il grafo è costruito prima del chunking, perché le sue relazioni finiscono nell'intestazione dei chunk ([§5.5](#55-chunking-semantico)), ed è salvato atomicamente dopo l'attivazione del nuovo indice in `esperto_state/symbol_graph.json` con un campo `version` (`SYMBOL_GRAPH_VERSION`) che invalida automaticamente grafi generati da versioni precedenti del formato.
+Il grafo è costruito prima del chunking, perché le sue relazioni finiscono nell'intestazione dei chunk ([§5.5](#55-chunking-semantico)), ed è salvato atomicamente dopo l'attivazione del nuovo indice in `esperto_state/symbol_graph.json` con un campo `version` (`SYMBOL_GRAPH_VERSION`): un grafo di versione diversa viene ignorato.
 
 ### 5.7 Encoding e upsert
 
@@ -418,7 +418,7 @@ sequenceDiagram
 
 ### 6.2 Planner delle sotto-domande
 
-Con `use_planner=true` (default nel frontend), `plan_subquestions()` in [planner.py](esperto/src/core/rag/planner.py) interroga l'LLM con temperatura 0: se la domanda è già specifica resta da sola, altrimenti viene scomposta in 2-4 sotto-domande autonome. Il planner riceve la mappa del repository ([§6.5](#65-prompt-e-grounding)) e può ancorare le sotto-domande a file e simboli reali; il prompt vieta nomi di file, simboli o tecnologie assenti dalla domanda e dalla mappa (senza mappa, assenti dalla domanda). `parse_subquestions()` valida il JSON prodotto, deduplica case-insensitive, filtra frammenti troppo corti e, in caso di output non valido, **ricade sulla domanda originale**: il planner non può mai peggiorare il comportamento di base.
+Con `use_planner=true` (default nel frontend), `plan_subquestions()` in [planner.py](esperto/src/core/rag/planner.py) interroga l'LLM con temperatura 0: se la domanda è già specifica resta da sola, altrimenti viene scomposta in 2-4 sotto-domande autonome. Il planner riceve la mappa del repository ([§6.5](#65-prompt-e-grounding)) e può ancorare le sotto-domande a cartelle e classi reali; il prompt vieta nomi di file, simboli o tecnologie assenti dalla domanda e dalla mappa (senza mappa, assenti dalla domanda). `parse_subquestions()` valida il JSON prodotto, deduplica case-insensitive, filtra frammenti troppo corti e, in caso di output non valido, **ricade sulla domanda originale**: il planner non può mai peggiorare il comportamento di base.
 
 Al retrieval partecipano la domanda originale più al massimo 4 sotto-domande uniche, codificate in un solo passaggio BGE-M3 e cercate in parallelo.
 
@@ -430,8 +430,6 @@ Implementato da `HybridRetriever` in [retrieval.py](esperto/src/core/rag/retriev
 2. **Fusione RRF**: Reciprocal Rank Fusion combina i ranking denso e sparso senza richiedere normalizzazione degli score.
 3. **Soglia di rilevanza**: dei primi `K` chunk fusi si scartano quelli la cui similarità densa (coseno) è sotto `SEMANTIC_RELEVANCE_RATIO` volte la migliore. Lo score RRF dipende solo dalla posizione in classifica, quindi non si presta a una soglia; è esposto come `_score` e ordina i risultati.
 
-Fino alla versione precedente i candidati fusi erano riordinati con i multi-vettori ColBERT di BGE-M3. Il benchmark non ha mai misurato un guadagno (su `piccolo`, a parità di tutto il resto: Symbol MRR 0,74 senza contro 0,71 con, ctx recall 0,79 in entrambi), quindi il rerank è stato rimosso: l'indice non contiene più un vettore per token e l'indicizzazione calcola solo le rappresentazioni densa e sparsa.
-
 ### 6.4 Post-processing del contesto
 
 Per ogni domanda (originale e sotto-domande) si raccolgono i candidati con i simboli nominati, enrichment same-file ed espansione via grafo; i candidati di tutte le domande sono poi uniti per `chunk_id`; i risultati diretti sono ri-ordinati sulla domanda originale (`rerank_chunk_ids()`: la fusione dense+sparse ristretta ai candidati), mentre i vicini del grafo saltano il rerank e occupano una quota riservata del budget:
@@ -439,22 +437,28 @@ Per ogni domanda (originale e sotto-domande) si raccolgono i candidati con i sim
 1. **Deduplica** per `chunk_id` mantenendo lo score massimo (`_keep_highest_scoring()`).
 2. **Simboli nominati** (`use_symbol_lookup`): le parole della domanda con la forma di un identificatore (un underscore, un punto o una maiuscola) sono cercate nella tabella dei simboli (`SymbolGraph.chunks_named()`); i chunk che le definiscono entrano tra i candidati diretti, in parallelo alla ricerca ibrida, e nelle fonti stanno in testa. Un nome definito in più di `MAX_NAME_MATCHES=3` chunk è ambiguo e viene ignorato. Vale anche per le sotto-domande del planner.
 3. **Enrichment same-file**: per ogni file che compare nei top risultati, fino a 4 chunk aggiuntivi dallo stesso file per fornire contesto locale.
-4. **Espansione via symbol graph**: i risultati della ricerca e i simboli nominati (non i chunk aggiunti per same-file) fungono da semi per `SymbolGraph.related_chunks()`, che restituisce per ogni domanda fino a `SYMBOL_GRAPH_MAX_NEIGHBORS=6` chunk correlati (funzioni chiamanti/chiamate, superclassi/sottoclassi) con la relazione esposta in `_graph_relation`. Vedi [§8](#8-symbol-graph).
-5. **Budget di contesto** (`_apply_context_budget()`): ordinamento per score decrescente e selezione entro `RAG_CONTEXT_MAX_SOURCES=35` fonti e il budget di caratteri derivato da `LLM_CONTEXT_TOKENS`. Ai vicini del grafo sono riservati fino a `SYMBOL_GRAPH_MAX_NEIGHBORS` posti per ogni domanda (originale e sotto-domande) e la quota proporzionale di caratteri, mai oltre metà del budget; nelle fonti compaiono in coda, senza score.
+4. **Espansione via symbol graph**: i risultati della ricerca e i simboli nominati (non i chunk aggiunti per same-file) fungono da semi per `SymbolGraph.related_chunks()`, che restituisce per ogni domanda fino a `SYMBOL_GRAPH_MAX_NEIGHBORS=6` chunk correlati (funzioni chiamanti/chiamate, superclassi/sottoclassi) con la relazione esposta in `_graph_relation`; i vicini diretti dei primi `TOP_SEEDS=3` semi hanno la precedenza. Vedi [§8](#8-symbol-graph).
+5. **Budget di contesto** (`_apply_context_budget()`): ordinamento per score decrescente e selezione entro `RAG_CONTEXT_MAX_SOURCES=35` fonti e il budget di caratteri derivato da `LLM_CONTEXT_TOKENS`. Ai vicini del grafo sono riservati fino a `SYMBOL_GRAPH_MAX_NEIGHBORS` posti per ogni domanda (originale e sotto-domande) e la quota proporzionale di caratteri, mai oltre metà del budget; nelle fonti compaiono in coda, senza score. Nel conteggio dei caratteri gli import del modulo valgono una volta per file, come nel contesto mostrato al modello.
 
 ### 6.5 Prompt e grounding
 
-**Mappa del repository.** Prima del contesto recuperato il prompt include una mappa compatta e deterministica, costruita in indicizzazione da `build_repo_map()` in [repo_map.py](esperto/src/core/indexing/repo_map.py) e salvata in `esperto_state/repo_map.txt`: l'inizio del README (ripulito da HTML, immagini e righe di soli link), l'elenco dei file indicizzati con i loro simboli top-level e una riga per ogni cartella di test. Il budget è il 15% di quello del contesto (`REPO_MAP_MAX_CHARS`); se non basta si riducono i simboli per file e poi si tronca l'elenco. Serve alle domande generali, per cui la ricerca per somiglianza non trova nulla di utile. La stessa mappa viene passata al planner, che può così ancorare le sotto-domande a file e simboli reali invece di riformulare alla cieca. Si disattiva per richiesta con `use_repo_map=false` (ablation `no_repo_map` del benchmark, che incide quindi su retrieval e generazione) ed è inviata al client nell'evento `sources`.
+**Mappa del repository.** Prima del contesto recuperato il prompt include una mappa compatta e deterministica, costruita in indicizzazione da `build_repo_map()` in [repo_map.py](esperto/src/core/indexing/repo_map.py) e salvata in `esperto_state/repo_map.txt`. Ha tre parti, entro `REPO_MAP_MAX_CHARS` (il 15% del budget del contesto):
 
-**Ordine del contesto.** `_build_context()` in [chain.py](esperto/src/core/rag/chain.py) raggruppa le fonti per file: i file nell'ordine del loro chunk meglio classificato, i chunk dello stesso file per riga. L'elenco `sources` inviato al client resta in ordine di rilevanza.
+1. **README**: l'inizio del README più vicino alla radice, saltate le righe iniziali di badge e HTML (al più un quarto del budget).
+2. **Cartelle**: una riga per cartella con il numero di file indicizzati, alla profondità massima che entra in metà del budget.
+3. **Gerarchia delle classi**: per ogni classe base definita fuori dai test, le sottoclassi dirette (al più `MAX_SUBCLASSES=10`), ricavate dagli archi `inherits` del symbol graph; prima le classi con più sottoclassi, finché c'è spazio.
 
-`build_prompt()` in [prompts.py](esperto/src/core/rag/prompts.py) compone un unico `HumanMessage` (alcuni modelli Ollama gestiscono male un `SystemMessage` separato) con, nell'ordine: mappa del repository, contesto recuperato, regole e domanda. Le regole tassative includono:
+Serve alle domande generali e di architettura, per cui la ricerca per somiglianza non basta. La stessa mappa viene passata al planner, che vi ancora le sotto-domande a cartelle e classi reali. Si disattiva per richiesta con `use_repo_map=false` (ablation `no_repo_map` del benchmark, che incide quindi su retrieval e generazione) ed è inviata al client nell'evento `sources`.
 
-- usare **esclusivamente** il codice nel contesto fornito; se l'informazione non è visibile, dichiararlo esplicitamente;
-- non assumere l'esistenza di librerie o funzioni non presenti;
-- citare sempre file e funzione/linea di riferimento;
+**Ordine del contesto.** `_build_context()` in [chain.py](esperto/src/core/rag/chain.py) raggruppa le fonti per file: i file nell'ordine del loro chunk meglio classificato, i chunk dello stesso file per riga. Il blocco degli import del modulo, presente in ogni chunk, resta solo sul primo chunk di ogni file (`without_imports()`). L'elenco `sources` inviato al client resta in ordine di rilevanza e con il testo completo.
+
+`build_prompt()` in [prompts.py](esperto/src/core/rag/prompts.py) compone un unico `HumanMessage` (alcuni modelli Ollama gestiscono male un `SystemMessage` separato) con, nell'ordine: mappa del repository, domanda, contesto recuperato, regole e di nuovo la domanda. La mappa, uguale a ogni richiesta, apre il prompt perché Ollama ne riusi la cache; la domanda precede il contesto perché il modello lo legga sapendo cosa cercare. Le regole sono cinque:
+
+- usare solo il codice e le informazioni del contesto, senza inventare file, funzioni o librerie;
+- se la risposta non è nel contesto, dichiararlo esplicitamente;
+- citare file e funzione o classe di riferimento;
 - per le modifiche proposte, mostrare "Prima" e "Dopo";
-- concisione, niente parafrasi ripetitive né chiusure generiche.
+- essere concisi.
 
 Il prompt renderizzato di ogni richiesta è salvato in `esperto_debug/last_prompt.json` (`PROMPT_DEBUG_FILE`) per ispezione.
 
@@ -556,11 +560,12 @@ La classe `SymbolGraph` in [services/symbol_graph.py](esperto/src/core/services/
 
 `chunks_named(text)` è la tabella dei simboli: al caricamento ogni nodo è indicizzato per nome corto (`login`) e qualificato (`BaseUser.login`) verso il chunk che lo contiene; la ricerca è esatta e distingue maiuscole e minuscole ([§6.4](#64-post-processing-del-contesto)).
 
-`related_chunks(chunk_ids, limit)` esegue:
+`related_chunks(chunk_ids, limit, top_chunk_ids)` esegue:
 
 1. **BFS bidirezionale** dagli archi `calls`/`inherits` a partire dai simboli seed, con profondità massima `SYMBOL_GRAPH_MAX_DEPTH=3`, escludendo i seed stessi e i chunk già presenti nel contesto.
 2. **Personalized PageRank** sui candidati raggiunti (damping `0.4`, 20 iterazioni, tolleranza `1e-6`), personalizzato sui seed (teleport e massa dei nodi senza archi uscenti tornano ai seed) e propagato sui soli archi diretti; a parità di score, come per i chiamanti, prevale il percorso BFS più corto.
-3. **Selezione** dei top `SYMBOL_GRAPH_MAX_NEIGHBORS=6` chunk correlati, ciascuno annotato con il percorso BFS più breve come stringa di relazione (esposta al client come `graph_relation`).
+3. **Precedenza ai vicini diretti** dei primi risultati (`top_chunk_ids`): i chunk a un passo da quei semi vengono prima di tutti gli altri, e tra loro prima quelli nello stesso scope (classe o modulo) del seme; completano le catene di chiamate che la ricerca per somiglianza non trova.
+4. **Selezione** dei top `SYMBOL_GRAPH_MAX_NEIGHBORS=6` chunk correlati, ciascuno annotato con il percorso BFS più breve come stringa di relazione (esposta al client come `graph_relation`).
 
 L'effetto pratico: se l'utente chiede di una funzione, il contesto include automaticamente anche i suoi chiamanti e le funzioni che invoca, anche se lessicalmente dissimili dalla domanda.
 
@@ -664,7 +669,7 @@ Ogni run scrive in `benchmark_results/<run_id>/` (l'orario nel nome è UTC): `st
 
 **Categorie del gold set.** `lookup`, `behavior`, `multihop` e `architecture` hanno simboli rilevanti e fatti chiave; `overview` (domande di panoramica come "descrivi la codebase") ha solo fatti chiave, quindi conta per la generazione e non per le metriche di retrieval; `unanswerable` non ha gold e misura le risposte inventate. La cartella `requests_en` contiene le stesse domande in inglese.
 
-**Giudizio delle risposte.** Il servizio non usa un LLM giudice. A fine generazione scrive `to_judge.jsonl`: per ogni risposta una chiave opaca, la domanda, i fatti chiave e la risposta, senza la configurazione e in ordine indipendente da essa, così chi giudica lavora alla cieca; il contesto usato per ciascuna è in `contexts/<chiave>.txt`. I verdetti (`fact_verdicts`, uno per fatto chiave; `abstains`; `faithful`, facoltativo) si consegnano con `POST /runs/{run_id}/judgments`, che li salva in `judgments.jsonl` e rigenera il report con correttezza, falsi rifiuti, hallucination e fedeltà. Un verdetto con un numero di fatti sbagliato viene scartato e la risposta resta non giudicata.
+**Giudizio delle risposte.** Le risposte sono giudicate fuori dal servizio. A fine generazione questo scrive `to_judge.jsonl`: per ogni risposta una chiave opaca, la domanda, i fatti chiave e la risposta, senza la configurazione e in ordine indipendente da essa, così chi giudica lavora alla cieca; il contesto usato per ciascuna è in `contexts/<chiave>.txt`. I verdetti (`fact_verdicts`, uno per fatto chiave; `abstains`; `faithful`, facoltativo) si consegnano con `POST /runs/{run_id}/judgments`, che li salva in `judgments.jsonl` e rigenera il report con correttezza, falsi rifiuti, hallucination e fedeltà. Un verdetto con un numero di fatti sbagliato viene scartato e la risposta resta non giudicata.
 
 ---
 
@@ -816,31 +821,25 @@ Ogni upload produce una directory `job-{uuid}`; `_activate()` aggiorna il symlin
 
 ## 13. Sicurezza
 
-### 13.1 Controlli implementati
-
 - **Validazione ZIP** ([zip_validation.py](esperto/src/ingestion/zip_validation.py)): magic bytes, integrità CRC, limite dimensione dell'archivio e del contenuto decompresso, rifiuto di path traversal e percorsi assoluti, whitelist di estensioni.
 - **Grounding anti-allucinazione**: prompt con regole tassative (solo codice nel contesto, citazione obbligatoria delle fonti, divieto di assumere API inesistenti).
 - **Validazione input a monte**: limiti di lunghezza sulle domande via Pydantic; sanitizzazione testo (`sanitize_text()`).
 - **Isolamento dell'indicizzazione**: subprocess dedicato, staging separato, attivazione atomica.
 - **Raggiungibilità ridotta**: la porta 5001 dell'indexer non è pubblicata sull'host.
 
-### 13.2 Limitazioni note
-
-- **Nessuna autenticazione** su `/ask` e `/upload`: il sistema è pensato per uso locale/interno, non per esposizione pubblica.
-- **Un solo job di indicizzazione alla volta** (mutex in-process): upload concorrenti ricevono `409`.
+Le limitazioni di sicurezza sono elencate in [§16](#16-limitazioni-note).
 
 ---
 
 ## 14. Testing
 
 - **Unit test** (`esperto/tests/`, `benchmark/tests/`): `python -m pytest tests/ -v` dalla cartella del servizio. Nessuna dipendenza da Ollama o Qdrant: l'ambiente minimo è impostato nei rispettivi `conftest.py`.
-- **Benchmark** (`benchmark/`, porta 5002, profilo compose `benchmark`): indicizza un repository a commit fissato, interroga `esperto` su un gold set (`datasets/<nome>/questions.yaml`) e produce in `benchmark_results/<run_id>/` metriche di retrieval, generazione e latenza con intervalli bootstrap. Le configurazioni di ablation disattivano un singolo stadio tramite `RetrievalOptions`. Per restare leggero:
-  - **campione stratificato**: di default 4 domande per categoria (`per_category`, `seed`; `null` = tutto il gold set), estratte in modo riproducibile;
-  - **piano condiviso**: nello stadio di retrieval il planner gira una volta per domanda e le ablation che lo condividono riusano le stesse sotto-domande (campo `subquestions` di `/retrieve`);
-  - **latenza senza stadio dedicato**: i tempi (retrieval, primo token, totale) sono quelli delle richieste di generazione;
-  - **generazione ridotta e senza giudice in linea**: di default `full`, `naive`, `naive_budget` e `closed_book`; le risposte sono giudicate dopo, fuori dal servizio.
-
-  Per essere affidabile: fallisce subito se `esperto` non è pronto o se con `skip_index` l'indice attivo non è quello del dataset; un run interrotto si riprende con `POST /runs/{id}/resume`, che salta indicizzazione e domande già completate; il report mostra per ogni configurazione il numero di domande, le richieste fallite e la quota di risposte giudicate. Endpoint: `POST /runs`, `POST /runs/{id}/resume`, `GET /runs/{id}`, `GET /runs/{id}/report`, `POST /datasets/{nome}/validate`.
+- **Benchmark** (`benchmark/`, porta 5002, profilo compose `benchmark`): indicizza un repository a commit fissato, interroga `esperto` su un gold set (`datasets/<nome>/questions.yaml`) e produce in `benchmark_results/<run_id>/` metriche di retrieval, generazione e latenza con intervalli bootstrap. Endpoint, parametri e file prodotti sono in [§9.4](#94-benchmark--benchmark-5002).
+  - **Ablation**: ogni configurazione disattiva un singolo stadio tramite `RetrievalOptions`.
+  - **Campione stratificato**: 4 domande per categoria di default (`per_category`, `seed`), estratte in modo riproducibile.
+  - **Piano condiviso**: nello stadio di retrieval il planner gira una volta per domanda e le configurazioni che lo condividono riusano le stesse sotto-domande (campo `subquestions` di `/retrieve`).
+  - **Latenza**: i tempi (retrieval, primo token, totale) sono quelli delle richieste di generazione.
+  - **Controlli**: il run fallisce subito se `esperto` non è pronto o se con `skip_index` l'indice attivo non è quello del dataset; il report mostra per ogni configurazione il numero di domande, le richieste fallite e la quota di risposte giudicate.
 
 ---
 
@@ -849,7 +848,7 @@ Ogni upload produce una directory `job-{uuid}`; `_activate()` aggiorna il symlin
 | # | Decisione | Motivazione | Trade-off accettato |
 |---|---|---|---|
 | D1 | **Chunking AST-aware per Python** | Un chunk = un'unità semantica (funzione o classe; metodi solo per classi oltre 400 righe) con import di contesto: retrieval e citazioni più precise | Solo Python ha chunking strutturale; gli altri formati usano splitter testuale |
-| D2 | **Retrieval ibrido a due vie (dense + sparse), senza rerank ColBERT** | La densa cattura semantica, la sparsa i termini esatti (nomi di simboli!); il rerank ColBERT, presente in origine, non ha mai dato un guadagno misurabile nel benchmark | Nessun riordino token-level; in cambio indice più piccolo e indicizzazione più leggera |
+| D2 | **Retrieval ibrido a due vie (dense + sparse) con fusione RRF** | La densa cattura il significato, la sparsa i termini esatti (nomi di simboli); la fusione per posizione non richiede di normalizzare gli score | Nessun riordino token-level dei candidati |
 | D3 | **Symbol graph statico da AST** | Espansione del contesto lungo relazioni reali del codice senza eseguirlo | Grafo limitato a relazioni staticamente rilevabili; utile solo se il dataset contiene Python |
 | D4 | **Ingestion in subprocess con attivazione atomica** | Isolamento memoria/fallimenti; l'indice servito non è mai in stato intermedio (alias Qdrant) | Un job alla volta; latenza di avvio subprocess |
 | D5 | **Fingerprint per idempotenza** | Re-upload dello stesso archivio è quasi gratuito; rebuild automatico al variare di modello o contenuti | Nessuna indicizzazione incrementale: ogni modifica ricostruisce tutto |
@@ -863,9 +862,8 @@ Ogni upload produce una directory `job-{uuid}`; `_activate()` aggiorna il symlin
 
 ## 16. Limitazioni note
 
-### 16.1 Limitazioni attuali
-
-- **Nessuna autenticazione/autorizzazione**: uso previsto solo in rete fidata.
+- **Nessuna autenticazione/autorizzazione** su `/ask` e `/upload`: uso previsto solo in rete fidata.
+- **Un solo job di indicizzazione alla volta** (mutex in-process): upload concorrenti ricevono `409`.
 - **Nessuna indicizzazione incrementale**: ogni modifica ai sorgenti richiede un rebuild completo (mitigato dal fingerprint per i re-upload identici).
 - **Chunking strutturale solo per Python**: altri linguaggi ricadono sullo splitter testuale.
 - **Nessuna cache delle risposte**: ogni domanda riesegue retrieval e generazione completi.

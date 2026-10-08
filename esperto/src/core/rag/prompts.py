@@ -5,33 +5,23 @@ from langchain_core.prompts import (
     HumanMessagePromptTemplate,
 )
 
-# Singolo messaggio utente: alcuni modelli Ollama gestiscono male i SystemMessage
-# separati e restituiscono risposte vuote. Il contesto va prima delle istruzioni.
+# Singolo messaggio utente: alcuni modelli Ollama gestiscono male i SystemMessage separati e
+# restituiscono risposte vuote. La mappa, uguale per ogni richiesta, apre il prompt (Ollama ne
+# riusa la cache); la domanda precede il contesto, cosi' il modello lo legge sapendo cosa cercare,
+# ed e' ripetuta in fondo. Poche regole: un modello piccolo ne segue bene poche.
 INSTRUCTION = (
     "{repo_map}"
+    "DOMANDA A CUI RISPONDERE: {question}\n\n"
     "CONTESTO RECUPERATO DALLA CODEBASE:\n"
     "{context}\n\n"
     "ISTRUZIONI:\n"
-    "Sei un assistente tecnico senior con accesso diretto alla codebase del progetto.\n"
-    "Il tuo compito è analizzare i file forniti nel contesto e rispondere all'utente.\n\n"
-    "REGOLE TASSATIVE DI RISPOSTA:\n"
-    "1. Usa ESCLUSIVAMENTE il codice e le informazioni presenti nel contesto fornito.\n"
-    "2. Se la risposta non è chiaramente deducibile dal codice fornito, dì esplicitamente "
-    "\"Non lo so basandomi sul codice fornito\". Non indovinare né dedurre logiche non visibili.\n"
-    "3. Non assumere l'esistenza di librerie, variabili o funzioni di cui non vedi "
-    "l'implementazione o la firma.\n"
-    "4. Se proponi modifiche o refactoring, mostra chiaramente il codice \"Prima\" "
-    "(quello del contesto) e il codice \"Dopo\" proposto.\n"
-    "5. Cita sempre il nome del file e, se presente, la linea o la funzione a cui ti riferisci.\n\n"
-    "6. Traduci correttamente i vocaboli tecnici.\n"
-    "NON GENERARE:\n"
-    "- Parafrasi ripetitive della stessa informazione\n"
-    "- Elaborazioni prolungate dello stesso concetto\n"
-    "- Considerazioni generiche non ancorate al codice\n"
-    "- Frasi come 'come detto prima', 'come accennato', 'in conclusione posso dire che'\n\n"
-    "LUNGHEZZA RISPOSTA:\n"
-    "- Sii conciso: preferisci risposte precise e dirette.\n"
-    "- Non aggiungere mai contenuto per raggiungere una lunghezza minima.\n\n"
+    "Sei un assistente tecnico con accesso alla codebase del progetto. "
+    "Rispondi alla domanda usando il contesto qui sopra.\n"
+    "1. Usa solo il codice e le informazioni del contesto: non inventare file, funzioni o librerie.\n"
+    "2. Se la risposta non è nel contesto, scrivi \"Non lo so basandomi sul codice fornito\".\n"
+    "3. Cita il file e la funzione o classe a cui ti riferisci.\n"
+    "4. Se proponi modifiche, mostra il codice \"Prima\" e \"Dopo\".\n"
+    "5. Sii conciso: niente premesse né ripetizioni.\n\n"
     "DOMANDA: {question}\n\n"
     "RISPOSTA TECNICA:"
 )

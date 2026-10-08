@@ -92,7 +92,7 @@ def build_index() -> None:
 
     activate_collection(client, collection)
     save_symbol_graph(graph)
-    save_repo_map(documents, source_files)
+    save_repo_map(source_files, graph)
     save(fingerprint, len(source_files))
     logger.info("Indicizzazione completata in %.2fs.", time.time() - start_time)
 

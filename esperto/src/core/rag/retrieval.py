@@ -27,10 +27,12 @@ from ..services.qdrant import (
 )
 from ..services.symbol_graph import SymbolGraph
 from ..shared.options import RetrievalOptions
-from ..shared.text import sanitize_text
+from ..shared.text import sanitize_text, without_imports
 from ..shared.vectors import QueryVectors
 
 SAME_FILE_LIMIT = 4
+# Risultati i cui vicini diretti nel grafo hanno la precedenza sugli altri.
+TOP_SEEDS = 3
 
 
 def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
@@ -44,16 +46,23 @@ def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
 
 
 def _apply_context_budget(documents: Iterable[Document], max_sources: int, max_chars: int) -> list[Document]:
-    """Keep ranked documents within the given source-count and character budgets."""
+    """Keep ranked documents within the given source-count and character budgets.
+
+    Gli import del modulo contano una volta per file, come nel contesto mostrato al modello.
+    """
     selected: list[Document] = []
+    filenames: set[str] = set()
     total_characters = 0
     for document in documents:
         if len(selected) >= max_sources:
             break
-        size = len(document.page_content)
+        filename = document.metadata.get("filename")
+        content = document.page_content
+        size = len(without_imports(content) if filename in filenames else content)
         if selected and total_characters + size > max_chars:
             continue
         selected.append(document)
+        filenames.add(filename)
         total_characters += size
     return selected
 
@@ -101,7 +110,7 @@ class HybridRetriever:
         for document in named:
             document.metadata["_symbol_match"] = True
         # Il grafo parte dai soli semi: risultati della ricerca e simboli nominati nella domanda.
-        seed_ids = {document.metadata["chunk_id"] for document in chain(documents, named)}
+        seeds = [document.metadata["chunk_id"] for document in chain(named, documents)]
         if options.use_same_file:
             filenames = dict.fromkeys(document.metadata["filename"] for document in documents)
             same_file = await asyncio.gather(
@@ -123,7 +132,9 @@ class HybridRetriever:
         if not options.use_symbol_graph:
             return documents
 
-        relations = self._symbol_graph.related_chunks(seed_ids, limit=SYMBOL_GRAPH_MAX_NEIGHBORS)
+        relations = self._symbol_graph.related_chunks(
+            set(seeds), limit=SYMBOL_GRAPH_MAX_NEIGHBORS, top_chunk_ids=seeds[:TOP_SEEDS]
+        )
         graph_documents = await get_documents_by_chunk_ids(self._client, list(relations))
         for document in graph_documents:
             document.metadata["_graph_relation"] = relations[document.metadata["chunk_id"]]

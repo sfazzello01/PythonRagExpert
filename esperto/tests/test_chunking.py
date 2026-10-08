@@ -84,7 +84,9 @@ def test_large_class_is_split_into_header_and_methods(tmp_path, monkeypatch):
     by_symbol = {doc.metadata["symbol_name"]: doc for doc in documents}
     assert list(by_symbol) == ["Big", "Big.m0", "Big.m1", "Big.m2"]
     assert "limit = 3" in by_symbol["Big"].page_content
-    assert "def m0" not in by_symbol["Big"].page_content
+    # L'intestazione elenca le firme dei metodi, senza decoratori ne' corpo.
+    assert by_symbol["Big"].page_content.endswith("    def m0(self): ...\n    def m1(self): ...\n    def m2(self): ...\n")
+    assert "pass" not in by_symbol["Big"].page_content
     assert by_symbol["Big.m1"].metadata["chunk_type"] == "method"
     assert "@property\n    def m1" in by_symbol["Big.m1"].page_content
     assert len({doc.metadata["chunk_id"] for doc in documents}) == 4

@@ -14,6 +14,7 @@ from .prompts import build_prompt
 from .planner import plan_subquestions
 from .retrieval import HybridRetriever
 from ..shared.options import RetrievalOptions
+from ..shared.text import without_imports
 
 _retriever: HybridRetriever | None = None
 
@@ -77,12 +78,20 @@ def _save_last_prompt(prompt_value) -> None:
 
 
 def _build_context(sources: list[dict]) -> str:
-    """Join the sources grouped by file: files by their best-ranked chunk, chunks in source order."""
+    """Join the sources grouped by file: files by their best-ranked chunk, chunks in source order.
+
+    Gli import del modulo, ripetuti in ogni chunk, restano solo sul primo chunk di ogni file.
+    """
     file_rank: dict[str, int] = {}
     for rank, source in enumerate(sources):
         file_rank.setdefault(source["filename"], rank)
     ordered = sorted(sources, key=lambda source: (file_rank[source["filename"]], source["start_line"] or 0))
-    return "\n\n---\n\n".join(source["content"] for source in ordered)
+    shown: set[str] = set()
+    parts = []
+    for source in ordered:
+        parts.append(without_imports(source["content"]) if source["filename"] in shown else source["content"])
+        shown.add(source["filename"])
+    return "\n\n---\n\n".join(parts)
 
 
 async def retrieve_only(

@@ -176,3 +176,37 @@ def test_chunk_relations_list_bases_and_calls_per_chunk():
     assert relations["chunk_run"]["inherits"] == ["Base"]
     assert relations["chunk_run"]["calls"] == [f"f{index}" for index in range(MAX_HEADER_CALLS)]
     assert "chunk_base" not in relations
+
+
+def test_direct_neighbors_of_the_top_results_come_first(tmp_path):
+    # seed chiama a, a chiama b: per il PageRank a viene prima di other; other e' pero' un vicino
+    # diretto di top, che e' tra i primi risultati.
+    graph = SymbolGraph(_write_graph(tmp_path, [("m::seed", "m::a"), ("m::a", "m::b"), ("m::top", "m::other")]))
+    seeds = {"chunk_seed", "chunk_top"}
+    assert list(graph.related_chunks(seeds, limit=6))[0] == "chunk_a"
+    assert list(graph.related_chunks(seeds, limit=6, top_chunk_ids=["chunk_top"]))[0] == "chunk_other"
+
+
+def test_calls_and_bases_are_resolved_through_reexports(tmp_path, monkeypatch):
+    from src.core.indexing import symbol_graph
+
+    monkeypatch.setattr(symbol_graph, "relative_path", lambda path: path.relative_to(tmp_path).as_posix())
+    sources = {
+        "pkg/query/base.py": "class Query:\n    pass\n",
+        "pkg/query/methods/select.py": "from pkg.query.base import Query\n\nclass Select(Query):\n    pass\n",
+        "pkg/query/methods/__init__.py": "from .select import Select\n",
+        "pkg/query/__init__.py": "from .methods import Select\n",  # import relativo in un package
+        "pkg/table.py": "from pkg.query import Select\n\ndef select():\n    return Select()\n",
+    }
+    files = []
+    for name, code in sources.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(code, encoding="utf-8")
+        files.append(path)
+
+    edges = {(edge["source"], edge["target"], edge["kind"]) for edge in symbol_graph.build_symbol_graph(files)["edges"]}
+
+    # `pkg.query` riesporta Select da `pkg.query.methods`, che la riesporta da `select.py`.
+    assert ("pkg.table::select", "pkg.query.methods.select::Select", "calls") in edges
+    assert ("pkg.query.methods.select::Select", "pkg.query.base::Query", "inherits") in edges

@@ -96,7 +96,7 @@ LLM_CONTEXT_TOKENS = config.llm_context_tokens
 # Due terzi della finestra al contesto (~3 caratteri per token di codice), il resto a
 # istruzioni e risposta: oltre la finestra Ollama tronca l'inizio del prompt.
 RAG_CONTEXT_MAX_CHARS = LLM_CONTEXT_TOKENS * 2 // 3 * 3
-# Mappa del repository (README, file e simboli) inserita in ogni prompt prima del contesto.
+# Mappa del repository (README, cartelle, gerarchia delle classi) inserita in ogni prompt prima del contesto.
 REPO_MAP_MAX_CHARS = RAG_CONTEXT_MAX_CHARS * 15 // 100
 RAG_CONTEXT_MAX_SOURCES = config.rag_context_max_sources
 INDEX_CHUNK_SIZE = config.index_chunk_size
@@ -114,5 +114,5 @@ INGESTION_WORKSPACE_DIR = config.ingestion_workspace_dir
 
 DENSE_DIMENSION = 1024
 SYMBOL_GRAPH_VERSION = 1
-# Da incrementare quando cambiano il chunking o i vettori salvati: invalida gli indici gia' costruiti.
-CHUNKING_VERSION = 5
+# Da incrementare quando cambiano il chunking, i vettori salvati o la mappa: invalida gli indici gia' costruiti.
+CHUNKING_VERSION = 7

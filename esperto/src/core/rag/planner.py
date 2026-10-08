@@ -23,7 +23,7 @@ Restituisci esclusivamente JSON valido: {{"subquestions":["..."]}}.
 
 _BLIND_GROUNDING = "Non introdurre ipotesi, nomi di file, simboli o tecnologie non presenti nella domanda."
 _MAP_GROUNDING = (
-    "Usa la mappa del repository per ancorare le sotto-domande a file e simboli reali e pertinenti.\n"
+    "Usa la mappa del repository per ancorare le sotto-domande a cartelle e classi reali e pertinenti.\n"
     "Non introdurre ipotesi, nomi di file, simboli o tecnologie non presenti nella domanda o nella mappa."
 )
 

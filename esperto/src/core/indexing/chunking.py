@@ -16,7 +16,7 @@ from .discovery import relative_path, service_for_path
 logger = logging.getLogger("EspertoChunking")
 
 # Oltre questa lunghezza una classe eccede la finestra dell'embedding e viene
-# indicizzata come intestazione + un chunk per metodo.
+# indicizzata come intestazione (con le firme dei metodi) + un chunk per metodo.
 CLASS_SPLIT_MIN_LINES = 400
 
 _FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -136,7 +136,7 @@ class PythonASTContextualChunker:
         return "".join(self.lines[_first_line(node) : node.end_lineno])
 
     def _split_class(self, node: ast.ClassDef) -> list[Document]:
-        """Chunk a large class as its header (signature, docstring, attributes) plus its methods."""
+        """Chunk a large class as its skeleton (signature, docstring, attributes, method signatures) plus its methods."""
         methods = _methods(node)
         method_lines = {
             index for method in methods for index in range(_first_line(method), method.end_lineno)
@@ -146,6 +146,8 @@ class PythonASTContextualChunker:
             for index, line in enumerate(self.lines[: node.end_lineno])
             if index >= _first_line(node) and index not in method_lines and line.strip()
         )
+        # Le firme dei metodi: chi legge l'intestazione vede la forma dell'intera classe.
+        header += "".join(self._signature(method) for method in methods)
         return [
             self._symbol_document(node, "class", node.name, header),
             *(
@@ -153,6 +155,11 @@ class PythonASTContextualChunker:
                 for method in methods
             ),
         ]
+
+    def _signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+        """The `def` line(s) of a method, without decorators and body."""
+        lines = self.lines[node.lineno - 1 : node.body[0].lineno - 1] or [self.lines[node.lineno - 1]]
+        return "".join(lines).rstrip() + " ...\n"
 
     def _symbol_document(self, node: ast.AST, chunk_type: str, name: str, source: str) -> Document:
         """Build the chunk of a function, class, or method (`name` is `Class.method` for methods)."""
