@@ -32,6 +32,8 @@ class AppConfig(BaseModel):
     dense_model_name: str = "BAAI/bge-m3"
     # True: modello quantizzato a 8 bit (piu' veloce senza OpenVINO, vettori leggermente diversi).
     embedding_int8: bool = False
+    # True: l'indexer codifica i chunk su GPU NVIDIA (PyTorch, fp16); richiede l'immagine costruita con INDEXER_GPU=1.
+    indexer_gpu: bool = False
     symbol_graph_max_neighbors: int = Field(default=6, ge=1)
     symbol_graph_max_depth: int = Field(default=3, ge=0)
     symbol_graph_pagerank_damping: float = Field(default=0.4, gt=0.0, lt=1.0)
@@ -86,6 +88,7 @@ BATCH_SIZE = config.batch_size
 INDEX_STATE_DIR = config.index_state_dir
 DENSE_MODEL_NAME = config.dense_model_name
 EMBEDDING_INT8 = config.embedding_int8
+INDEXER_GPU = config.indexer_gpu
 # Identifica i vettori prodotti: entra nell'impronta dell'indice e nella chiave della cache.
 EMBEDDING_MODEL_ID = f"{DENSE_MODEL_NAME}:int8" if EMBEDDING_INT8 else DENSE_MODEL_NAME
 SYMBOL_GRAPH_MAX_NEIGHBORS = config.symbol_graph_max_neighbors

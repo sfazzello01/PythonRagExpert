@@ -1,32 +1,38 @@
-"""Metriche pure: retrieval, citazioni e statistica (nessun I/O)."""
+"""Metriche pure: retrieval e statistica (nessun I/O)."""
 
 from __future__ import annotations
 
 import math
 import random
-import re
 from typing import Iterable, Optional, Sequence
 
-KS = (1, 3, 5, 10)
+# Stadio di esperto che porta un chunk tra i candidati, dal piu' semplice: se piu' stadi trovano
+# lo stesso simbolo vale il primo, cosi' si legge quanto ogni stadio aggiunge alla sola ricerca.
+ORIGINS = ("search", "symbol", "same_file", "graph")
+# Un simbolo atteso fuori dal contesto: trovato ma escluso dal budget, oppure mai trovato.
+LOST = ("budget", "missing")
 
 
-# --- Retrieval (rilevanza binaria su liste ordinate di chiavi) ---
-
-def unique_in_order(items: Iterable[str]) -> list[str]:
-    return list(dict.fromkeys(items))
-
-
-def hit_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
-    return float(any(item in relevant for item in ranked[:k]))
+def symbol_key(source: dict) -> str:
+    """Chiave di un chunk al livello del gold: un metodo (`Classe.metodo`) conta per la sua classe."""
+    return f"{source['filename']}::{str(source.get('symbol_name') or '').split('.')[0]}"
 
 
-def recall_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
-    return len(relevant.intersection(ranked[:k])) / len(relevant)
-
-
-def precision_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
-    top = ranked[:k]
-    return sum(item in relevant for item in top) / len(top) if top else 0.0
+def gold_status(sources: list[dict], dropped: list[dict], relevant: list[dict]) -> list[dict]:
+    """Dove finisce ogni simbolo atteso: lo stadio che lo porta nel contesto, `budget` o `missing`."""
+    in_context: dict[str, str] = {}
+    for source in sources:
+        key = symbol_key(source)
+        origin = source.get("origin") if source.get("origin") in ORIGINS else "search"
+        if key not in in_context or ORIGINS.index(origin) < ORIGINS.index(in_context[key]):
+            in_context[key] = origin
+    cut = {symbol_key(source) for source in dropped}
+    statuses = []
+    for item in relevant:
+        key = f"{item['file']}::{item['symbol']}"
+        status = in_context.get(key) or ("budget" if key in cut else "missing")
+        statuses.append({"symbol": key, "hop": item.get("hop", 1), "status": status})
+    return statuses
 
 
 def reciprocal_rank(ranked: Sequence[str], relevant: set[str]) -> float:
@@ -36,69 +42,23 @@ def reciprocal_rank(ranked: Sequence[str], relevant: set[str]) -> float:
     return 0.0
 
 
-def ndcg_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
-    dcg = sum(1.0 / math.log2(pos + 1) for pos, item in enumerate(ranked[:k], start=1) if item in relevant)
-    ideal = sum(1.0 / math.log2(pos + 1) for pos in range(1, min(len(relevant), k) + 1))
-    return dcg / ideal
-
-
-def _level_metrics(prefix: str, ranked: list[str], relevant: set[str]) -> dict[str, float]:
-    metrics: dict[str, float] = {}
-    for k in KS:
-        metrics[f"{prefix}_hit@{k}"] = hit_at_k(ranked, relevant, k)
-        metrics[f"{prefix}_recall@{k}"] = recall_at_k(ranked, relevant, k)
-        metrics[f"{prefix}_precision@{k}"] = precision_at_k(ranked, relevant, k)
-    metrics[f"{prefix}_mrr"] = reciprocal_rank(ranked, relevant)
-    metrics[f"{prefix}_ndcg@10"] = ndcg_at_k(ranked, relevant, 10)
-    # Sull'intero contesto restituito: e' cio' che il LLM puo' effettivamente usare.
-    metrics[f"{prefix}_context_recall"] = recall_at_k(ranked, relevant, max(len(ranked), 1))
-    return metrics
-
-
 def retrieval_metrics(sources: list[dict], relevant: list[dict]) -> dict[str, Optional[float]]:
-    """Metriche file e simbolo per una domanda con gold; `relevant` = [{file, symbol, hop}]."""
-    ranked_files = unique_in_order(s["filename"] for s in sources)
-    # Il gold e' top-level: un chunk di metodo (`Classe.metodo`) conta per la sua classe.
-    ranked_symbols = unique_in_order(f"{s['filename']}::{s['symbol_name'].split('.')[0]}" for s in sources)
-    gold_files = {r["file"] for r in relevant}
-    gold_symbols = {f"{r['file']}::{r['symbol']}" for r in relevant}
-    metrics: dict[str, Optional[float]] = {}
-    metrics.update(_level_metrics("file", ranked_files, gold_files))
-    metrics.update(_level_metrics("symbol", ranked_symbols, gold_symbols))
-    hop2 = {f"{r['file']}::{r['symbol']}" for r in relevant if r.get("hop", 1) == 2}
-    metrics["hop2_symbol_recall"] = (
-        len(hop2.intersection(ranked_symbols)) / len(hop2) if hop2 else None
-    )
-    # Dimensione del contesto: le configurazioni ne restituiscono di diverse, e il recall va letto insieme.
-    metrics["n_sources"] = float(len(sources))
-    metrics["context_chars"] = float(sum(len(s.get("content", "")) for s in sources))
-    return metrics
+    """Metriche di una domanda con gold; `relevant` = [{file, symbol, hop}].
 
-
-# --- Citazioni nella risposta ---
-
-_PATH_RE = re.compile(r"[\w./-]+\.py\b")
-
-
-def cited_paths(answer: str) -> set[str]:
-    return {match.lstrip("./") for match in _PATH_RE.findall(answer)}
-
-
-def _matches(cited: str, known: Iterable[str]) -> bool:
-    return any(path == cited or path.endswith("/" + cited) for path in known)
-
-
-def citation_stats(
-    answer: str, repo_files: Iterable[str], source_files: Iterable[str]
-) -> dict[str, Optional[float]]:
-    """Quota di percorsi citati che esistono nel repo / nelle fonti recuperate."""
-    cited = cited_paths(answer)
-    if not cited:
-        return {"citation_exists": None, "citation_in_context": None}
-    repo_files, source_files = list(repo_files), list(source_files)
+    - `symbol_mrr`: quanto in alto sta il primo simbolo atteso (ordinamento);
+    - `symbol_context_recall`: quota dei simboli attesi nel contesto (cio' che il LLM puo' usare);
+    - `hop2_symbol_recall`: lo stesso, sui soli simboli raggiungibili seguendo una relazione.
+    """
+    ranked = list(dict.fromkeys(symbol_key(source) for source in sources))
+    gold = {f"{item['file']}::{item['symbol']}" for item in relevant}
+    hop2 = {f"{item['file']}::{item['symbol']}" for item in relevant if item.get("hop", 1) == 2}
     return {
-        "citation_exists": sum(_matches(c, repo_files) for c in cited) / len(cited),
-        "citation_in_context": sum(_matches(c, source_files) for c in cited) / len(cited),
+        "symbol_mrr": reciprocal_rank(ranked, gold),
+        "symbol_context_recall": len(gold.intersection(ranked)) / len(gold),
+        "hop2_symbol_recall": len(hop2.intersection(ranked)) / len(hop2) if hop2 else None,
+        # Le configurazioni restituiscono contesti di dimensione diversa: il recall va letto insieme.
+        "n_sources": float(len(sources)),
+        "context_chars": float(sum(len(source.get("content", "")) for source in sources)),
     }
 
 
@@ -131,9 +91,7 @@ def paired_bootstrap_diff(
     return mean(a) - mean(b), low, high
 
 
-def cohens_kappa(labels_a: Sequence[bool], labels_b: Sequence[bool]) -> Optional[float]:
-    n = len(labels_a)
-    observed = sum(x == y for x, y in zip(labels_a, labels_b)) / n
-    p_a, p_b = sum(labels_a) / n, sum(labels_b) / n
-    expected = p_a * p_b + (1 - p_a) * (1 - p_b)
-    return None if expected == 1 else (observed - expected) / (1 - expected)
+def share(items: Iterable[str], wanted: Iterable[str]) -> float:
+    """Quota degli elementi che cadono in `wanted` (0 se non ce ne sono)."""
+    items, wanted = list(items), set(wanted)
+    return sum(item in wanted for item in items) / len(items) if items else 0.0

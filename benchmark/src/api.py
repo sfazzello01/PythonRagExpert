@@ -1,4 +1,4 @@
-"""API del servizio di benchmark: avvio run, stato, report, validazione dataset."""
+"""API del servizio di benchmark: avvio run, stato, verdetti, report, confronto, validazione dataset."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.responses import PlainTextResponse  # type: ignore
 from pydantic import BaseModel
 
-from config import DATASETS_DIR, RESULTS_DIR
+from config import RESULTS_DIR
 
 from .dataset import check_name, fetch_repo, load_dataset, validate_dataset
 from . import report
@@ -87,7 +87,6 @@ class Judgment(BaseModel):
     key: str  # chiave della risposta in to_judge.jsonl
     fact_verdicts: list[bool] = []  # un verdetto per fatto chiave, nello stesso ordine
     abstains: bool  # la risposta dichiara che l'informazione non e' nel codice
-    faithful: bool | None = None  # ogni affermazione e' supportata dal contesto (facoltativo)
 
 
 @app.post("/runs/{run_id}/judgments")
@@ -99,8 +98,7 @@ def submit_judgments(run_id: str, judgments: list[Judgment]) -> dict:
     (run_dir / "judgments.jsonl").write_text(
         "".join(json.dumps(judgment.model_dump()) + "\n" for judgment in judgments), encoding="utf-8"
     )
-    dataset = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["dataset"]["name"]
-    report.write_report(run_dir, DATASETS_DIR / dataset / "human_labels.json")
+    report.write_report(run_dir)
     return {"received": len(judgments)}
 
 
@@ -120,6 +118,12 @@ def run_report(run_id: str) -> str:
     if not report.exists():
         raise HTTPException(status_code=404, detail="Report non ancora disponibile")
     return report.read_text(encoding="utf-8")
+
+
+@app.get("/runs/{run_id}/compare/{other_id}", response_class=PlainTextResponse)
+def compare(run_id: str, other_id: str) -> str:
+    """Differenze appaiate tra due run (questo - l'altro) su configurazioni e domande in comune."""
+    return report.compare_runs(_run_dir(run_id), _run_dir(other_id))
 
 
 @app.post("/datasets/{name}/validate")

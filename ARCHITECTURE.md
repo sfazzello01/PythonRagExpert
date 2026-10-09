@@ -141,7 +141,7 @@ graph LR
 | `ollama` | `./ollama_data:/root/.ollama` | `OLLAMA_CONTEXT_LENGTH=${LLM_CONTEXT_TOKENS:-20000}`, `OLLAMA_KV_CACHE_TYPE=q4_0`, `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KEEP_ALIVE=-1` | — | NVIDIA ×1 (opzionale) |
 | `qdrant` | `./qdrant_data:/qdrant/storage` | — | TCP :6333, interval 10s, retries 12 | — |
 | `esperto` | `./hf_cache:/root/.cache/huggingface`, `./esperto_state:/app/state`, `esperto_workspace:/app/workspace`, `./esperto_debug:/app/debug` | `.env` + `HF_HOME`, `PROMPT_DEBUG_FILE=/app/debug/last_prompt.json` | `curl -f http://127.0.0.1:5000/health`, start_period 30s, retries 20 | — |
-| `esperto_indexer` | `./hf_cache:/root/.cache/huggingface`, `./esperto_state:/app/state`, `esperto_workspace:/app/workspace` | `.env` + `HF_HOME`, `INGESTION_WORKSPACE_DIR=/app/workspace` | `curl -f http://127.0.0.1:5001/health`, start_period 15s | — |
+| `esperto_indexer` | `./hf_cache:/root/.cache/huggingface`, `./esperto_state:/app/state`, `esperto_workspace:/app/workspace` | `.env` + `HF_HOME`, `INGESTION_WORKSPACE_DIR=/app/workspace` | `curl -f http://127.0.0.1:5001/health`, start_period 15s | NVIDIA ×1 con `INDEXER_GPU=1` |
 | `frontend_esperto` | — | `ESPERTO_URL=http://esperto:5000`, `ESPERTO_INDEXER_URL=http://esperto_indexer:5001`, `PYTHONPATH=/app` | — | — |
 | `benchmark` | `./benchmark/datasets:/app/datasets`, `./benchmark_results:/app/results` | `.env` + `ESPERTO_URL`, `ESPERTO_INDEXER_URL`, `OLLAMA_URL` | — | — |
 
@@ -175,6 +175,7 @@ esperto/
 ├── dockerfile                   # python:3.10-slim, dipendenze, EXPOSE 5000
 ├── pyproject.toml               # configurazione mypy
 ├── requirements.txt             # ONNX Runtime, nessun PyTorch
+├── requirements-gpu.txt         # PyTorch (CUDA) e Transformers, installati solo con INDEXER_GPU=1
 ├── requirements-dev.txt         # requirements.txt + pytest (fuori dalle immagini)
 └── src/
     ├── api.py                   # FastAPI :5000 — POST /ask (streaming), POST /retrieve, GET /health
@@ -240,13 +241,13 @@ benchmark/
 │   ├── requests_en/             #   stesse domande di requests tradotte in inglese
 │   └── piccolo/                 #   piccolo-orm/piccolo 1.22.0: 407 file, 60 domande (repository medio e meno noto)
 ├── src/
-│   ├── api.py                   # FastAPI :5002 — avvio, ripresa, stato, verdetti e report dei run
+│   ├── api.py                   # FastAPI :5002 — avvio, ripresa, stato, verdetti, report e confronto dei run
 │   ├── runner.py                # RunSpec, CONFIGS (ablation), campionamento, stadi retrieval e generazione
 │   ├── dataset.py               # caricamento e validazione del gold set, clone e ZIP del repository
 │   ├── esperto_client.py        # client HTTP verso esperto e indexer, con tempi dello stream
-│   ├── metrics.py               # metriche di retrieval, citazioni, bootstrap, kappa
+│   ├── metrics.py               # metriche di retrieval, stato dei simboli attesi, bootstrap
 │   ├── ollama.py                # client minimale per l'API chat di Ollama (baseline closed-book)
-│   └── report.py                # summary.json/csv e report.md
+│   └── report.py                # diagnosi e report.md, summary.json/csv, confronto tra run
 └── tests/                       # pytest: api, dataset, metrics, runner
 ```
 
@@ -420,7 +421,7 @@ sequenceDiagram
 
 ### 6.2 Planner delle sotto-domande
 
-Con `use_planner=true` (default nel frontend), `plan_subquestions()` in [planner.py](esperto/src/core/rag/planner.py) interroga l'LLM con temperatura 0: se la domanda è già specifica resta da sola, altrimenti viene scomposta in 2-4 sotto-domande autonome. Il planner riceve la mappa del repository ([§6.5](#65-prompt-e-grounding)) e può ancorare le sotto-domande a cartelle e classi reali; il prompt vieta nomi di file, simboli o tecnologie assenti dalla domanda e dalla mappa (senza mappa, assenti dalla domanda). `parse_subquestions()` valida il JSON prodotto, deduplica case-insensitive, filtra frammenti troppo corti e, in caso di output non valido, **ricade sulla domanda originale**: il planner non può mai peggiorare il comportamento di base.
+Con `use_planner=true` (default nel frontend), `plan_subquestions()` in [planner.py](esperto/src/core/rag/planner.py) interroga l'LLM con temperatura 0: se la domanda è già specifica resta da sola, altrimenti viene scomposta in 2-4 sotto-domande autonome. Il planner riceve la mappa del repository ([§6.5](#65-prompt-e-grounding)) e deve nominare nelle sotto-domande le classi pertinenti della gerarchia, con il nome esatto (così la tabella dei simboli le aggancia), ripiegando sulle cartelle solo se nessuna classe è pertinente; il prompt vieta nomi di file, simboli o tecnologie assenti dalla domanda e dalla mappa (senza mappa, assenti dalla domanda). `parse_subquestions()` valida il JSON prodotto, deduplica case-insensitive, filtra frammenti troppo corti e, in caso di output non valido, **ricade sulla domanda originale**: il planner non può mai peggiorare il comportamento di base.
 
 Al retrieval partecipano la domanda originale più al massimo 4 sotto-domande uniche, codificate in un solo passaggio BGE-M3 e cercate in parallelo.
 
@@ -450,7 +451,7 @@ Per ogni domanda (originale e sotto-domande) si raccolgono i candidati con i sim
 2. **Cartelle**: una riga per cartella con il numero di file indicizzati, alla profondità massima che entra in metà del budget.
 3. **Gerarchia delle classi**: per ogni classe base definita fuori dai test, le sottoclassi dirette (al più `MAX_SUBCLASSES=10`), ricavate dagli archi `inherits` del symbol graph; prima le classi con più sottoclassi, finché c'è spazio.
 
-Serve alle domande generali e di architettura, per cui la ricerca per somiglianza non basta. La stessa mappa viene passata al planner, che vi ancora le sotto-domande a cartelle e classi reali. Si disattiva per richiesta con `use_repo_map=false` (ablation `no_repo_map` del benchmark, che incide quindi su retrieval e generazione) ed è inviata al client nell'evento `sources`.
+Serve alle domande generali e di architettura, per cui la ricerca per somiglianza non basta. La stessa mappa viene passata al planner, che ne riprende i nomi delle classi nelle sotto-domande ([§6.2](#62-planner-delle-sotto-domande)). Si disattiva per richiesta con `use_repo_map=false` (ablation `no_repo_map` del benchmark, che incide quindi su retrieval e generazione) ed è inviata al client nell'evento `sources`.
 
 **Ordine del contesto.** `_build_context()` in [chain.py](esperto/src/core/rag/chain.py) raggruppa le fonti per file: i file nell'ordine del loro chunk meglio classificato, i chunk dello stesso file per riga. Il blocco degli import del modulo, presente in ogni chunk, resta solo sul primo chunk di ogni file (`without_imports()`). L'elenco `sources` inviato al client resta in ordine di rilevanza e con il testo completo.
 
@@ -474,7 +475,7 @@ Il prompt renderizzato di ogni richiesta è salvato in `esperto_debug/last_promp
 | `reasoning` | frammento di reasoning | Solo se `use_reasoning=true` e il modello lo produce |
 | `answer` | frammento di risposta | Streaming incrementale del completamento |
 
-Le fonti includono `filename`, `service`, `chunk_type`, `symbol_name`, `start_line`, `end_line`, `score` ed eventualmente `graph_relation`. Gli errori a metà stream (durata complessiva oltre `LLM_INFERENCE_TIMEOUT`, timeout o errori di Qdrant, eccezioni generiche) sono convertiti in eventi `[ERROR] ...` invece di troncare silenziosamente la risposta.
+Le fonti includono `filename`, `service`, `chunk_type`, `symbol_name`, `start_line`, `end_line`, `score`, `origin` (lo stadio che ha portato il chunk tra i candidati: `search`, `symbol`, `same_file` o `graph`; se più stadi lo trovano vale il primo) ed eventualmente `graph_relation`. Gli errori a metà stream (durata complessiva oltre `LLM_INFERENCE_TIMEOUT`, timeout o errori di Qdrant, eccezioni generiche) sono convertiti in eventi `[ERROR] ...` invece di troncare silenziosamente la risposta.
 
 ---
 
@@ -602,7 +603,7 @@ Interroga il sistema con risposta in streaming.
 
 #### `POST /retrieve`
 
-Planner + retrieval senza generazione, usato dal benchmark. Stesso corpo di `/ask` senza `use_reasoning`, più `subquestions` opzionale: un piano già calcolato che salta il planner; risponde con `{"subquestions": [...], "sources": [...]}`. Un errore o timeout di Qdrant produce `500`, mai una lista di fonti vuota.
+Planner + retrieval senza generazione, usato dal benchmark. Stesso corpo di `/ask` senza `use_reasoning`, più `subquestions` opzionale: un piano già calcolato che salta il planner; risponde con `{"subquestions": [...], "sources": [...], "dropped": [...]}`, dove `dropped` elenca senza testo i candidati rimasti fuori dal contesto: permette di distinguere un chunk mai trovato da uno trovato e tagliato dal budget. Un errore o timeout di Qdrant produce `500`, mai una lista di fonti vuota.
 
 #### `GET /health`
 
@@ -652,6 +653,7 @@ Il frontend agisce da **proxy trasparente**: nessuna logica RAG risiede qui; val
 | GET | `/runs/{run_id}` | Avanzamento (`status.json`: stadio, completate, totale, errore) |
 | GET | `/runs/{run_id}/report` | Report Markdown del run concluso |
 | POST | `/runs/{run_id}/judgments` | Riceve i verdetti sulle risposte di `to_judge.jsonl` e rigenera il report |
+| GET | `/runs/{run_id}/compare/{other_id}` | Differenze appaiate tra due run (questo − l'altro) sulle configurazioni e domande in comune |
 | POST | `/datasets/{nome}/validate` | Verifica che file e simboli del gold set esistano nel repository |
 
 Corpo di `POST /runs` (`RunSpec`):
@@ -660,7 +662,7 @@ Corpo di `POST /runs` (`RunSpec`):
 |---|---|---|
 | `dataset` | — | Nome della cartella in `benchmark/datasets/` |
 | `stages` | `["retrieval", "generation"]` | Stadi da eseguire |
-| `retrieval_configs` | tutte | `full`, `no_planner`, `no_symbol_graph`, `no_same_file`, `no_symbol_lookup`, `dense_only`, `sparse_only`, `no_repo_map`, `naive`, `naive_budget` (come `naive` ma con `k=50`: è il budget di contesto a tagliare, come in `full`); su richiesta anche `full_k12` e `full_k20` (come `full` con K fissato, per scegliere K senza riavviare `esperto`) |
+| `retrieval_configs` | tutte | `full`, `no_planner`, `no_symbol_graph`, `no_same_file`, `no_symbol_lookup`, `dense_only`, `sparse_only`, `no_repo_map`, `naive`, `naive_budget` (come `naive` ma con `k=50`: è il budget di contesto a tagliare, come in `full`). Ogni nome accetta il suffisso `@k=N` che ne fissa il K (es. `full@k=20`), per provare più valori senza riavviare `esperto` |
 | `generation_configs` | `["full", "naive", "naive_budget", "closed_book"]` | Configurazioni per cui generare le risposte (`closed_book` = modello senza contesto) |
 | `per_category` | `4` | Domande estratte per categoria; `null` = tutto il gold set |
 | `seed` | `0` | Seme del campionamento |
@@ -671,7 +673,18 @@ Ogni run scrive in `benchmark_results/<run_id>/` (l'orario nel nome è UTC): `st
 
 **Categorie del gold set.** `lookup`, `behavior`, `multihop` e `architecture` hanno simboli rilevanti e fatti chiave; `overview` (domande di panoramica come "descrivi la codebase") ha solo fatti chiave, quindi conta per la generazione e non per le metriche di retrieval; `unanswerable` non ha gold e misura le risposte inventate. La cartella `requests_en` contiene le stesse domande in inglese.
 
-**Giudizio delle risposte.** Le risposte sono giudicate fuori dal servizio. A fine generazione questo scrive `to_judge.jsonl`: per ogni risposta una chiave opaca, la domanda, i fatti chiave e la risposta, senza la configurazione e in ordine indipendente da essa, così chi giudica lavora alla cieca; il contesto usato per ciascuna è in `contexts/<chiave>.txt`. I verdetti (`fact_verdicts`, uno per fatto chiave; `abstains`; `faithful`, facoltativo) si consegnano con `POST /runs/{run_id}/judgments`, che li salva in `judgments.jsonl` e rigenera il report con correttezza, falsi rifiuti, hallucination e fedeltà. Un verdetto con un numero di fatti sbagliato viene scartato e la risposta resta non giudicata.
+**Giudizio delle risposte.** Le risposte sono giudicate fuori dal servizio. A fine generazione questo scrive `to_judge.jsonl`: per ogni risposta una chiave opaca, la domanda, i fatti chiave e la risposta, senza la configurazione e in ordine indipendente da essa, così chi giudica lavora alla cieca; il contesto usato per ciascuna è in `contexts/<chiave>.txt`. I verdetti (`fact_verdicts`, uno per fatto chiave, e `abstains`) si consegnano con `POST /runs/{run_id}/judgments`, che li salva in `judgments.jsonl` e rigenera il report. Un verdetto con un numero di fatti sbagliato viene scartato e la risposta resta non giudicata.
+
+**Metriche.** Di retrieval, sulle domande con gold: `symbol_mrr` (quanto in alto sta il primo simbolo atteso), `symbol_context_recall` (quota dei simboli attesi nel contesto) e `hop2_symbol_recall` (lo stesso sui simboli raggiungibili solo seguendo una relazione), più numero di fonti, caratteri e secondi. Di generazione, dopo il giudizio: correttezza (quota dei fatti chiave presenti), risposte inventate sulle domande senza risposta, rifiuti errati, più tempi e lunghezza della risposta.
+
+**Report.** `report.md` è costruito per dire dove intervenire:
+
+- **Diagnosi**: poche frasi ricavate dai dati, in testa al report.
+- **Dove finiscono i simboli attesi**: per ogni configurazione, la quota di simboli attesi nel contesto divisa per stadio che li ha portati (`origin`), quelli trovati ma esclusi dal budget (`dropped`) e quelli mai trovati. Distingue un problema di ricerca da uno di budget.
+- **Effetto di ogni configurazione**: differenze appaiate rispetto a `full`, con intervallo di confidenza; la diagnosi ne ricava gli stadi con e senza effetto misurabile.
+- **Domande con simboli mancanti**: per `full`, quali simboli mancano in quali domande.
+- **Retrieval o modello?**: correttezza delle domande con contesto completo (tutti i simboli attesi presenti) e incompleto; separa gli errori del retrieval da quelli del modello.
+- **Fatti sbagliati**: ogni fatto chiave mancato, con le configurazioni che lo sbagliano e un segno quando il contesto era incompleto.
 
 ---
 
@@ -731,6 +744,7 @@ Tutta la configurazione del backend è centralizzata in `AppConfig` ([esperto/co
 | Variabile | Default | Vincoli | Descrizione |
 |---|---|---|---|
 | `DENSE_MODEL_NAME` | `BAAI/bge-m3` | — | Identificativo HuggingFace del modello |
+| `INDEXER_GPU` | `0` | `0` / `1` | `1`: l'indexer codifica i chunk su GPU NVIDIA (PyTorch, fp16). Letta anche da compose per costruire l'immagine con PyTorch e assegnare la GPU: dopo averla cambiata serve `docker compose build esperto_indexer` |
 | `EMBEDDING_INT8` | `false` | bool | Modello quantizzato a 8 bit sul provider CPU standard (creato al primo avvio); i vettori cambiano, quindi richiede una reindicizzazione |
 | `EMBEDDING_MAX_LENGTH` | obbligatoria | 128–8192 | Lunghezza massima in token per encoding (tipicamente 1024) |
 | `BATCH_SIZE` | obbligatoria | 1–128 | Batch size dell'encoding in indicizzazione (tipicamente 8) |
@@ -842,6 +856,7 @@ Le limitazioni di sicurezza sono elencate in [§16](#16-limitazioni-note).
   - **Piano condiviso**: nello stadio di retrieval il planner gira una volta per domanda e le configurazioni che lo condividono riusano le stesse sotto-domande (campo `subquestions` di `/retrieve`).
   - **Latenza**: i tempi (retrieval, primo token, totale) sono quelli delle richieste di generazione.
   - **Controlli**: il run fallisce subito se `esperto` non è pronto o se con `skip_index` l'indice attivo non è quello del dataset; il report mostra per ogni configurazione il numero di domande, le richieste fallite e la quota di risposte giudicate.
+  - **Confronto tra run**: `GET /runs/{id}/compare/{altro}` calcola le differenze appaiate tra due run, per misurare l'effetto di una modifica al codice o all'indice.
 
 ---
 

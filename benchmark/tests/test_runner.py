@@ -10,15 +10,16 @@ from src.runner import RunSpec, check_spec, execute_run, judging_key, sample_que
 SOURCES = [
     {
         "filename": "src/requests/utils.py", "symbol_name": "default_user_agent", "chunk_type": "function",
-        "start_line": 1, "end_line": 5, "chunk_id": "c1", "score": 0.9, "graph_relation": None,
+        "start_line": 1, "end_line": 5, "chunk_id": "c1", "score": 0.9, "origin": "search", "graph_relation": None,
         "content": "def default_user_agent(): ...",
     },
     {
         "filename": "src/requests/api.py", "symbol_name": "get", "chunk_type": "function",
-        "start_line": 1, "end_line": 5, "chunk_id": "c2", "score": 0.5, "graph_relation": None,
+        "start_line": 1, "end_line": 5, "chunk_id": "c2", "score": 0.5, "origin": "graph", "graph_relation": "calls",
         "content": "def get(): ...",
     },
 ]
+DROPPED = [{"filename": "src/requests/sessions.py", "symbol_name": "Session.send", "chunk_id": "c3", "origin": "search"}]
 
 
 class FakeClient:
@@ -37,7 +38,10 @@ class FakeClient:
 
     def retrieve(self, question, use_planner, options, subquestions=None):
         self.plans.append(subquestions)
-        return {"subquestions": subquestions or [question, "sotto-domanda"], "sources": SOURCES, "seconds": 0.1}
+        return {
+            "subquestions": subquestions or [question, "sotto-domanda"], "sources": SOURCES, "dropped": DROPPED,
+            "seconds": 0.1,
+        }
 
     def ask(self, question, use_planner, options):
         self.asks += 1
@@ -69,7 +73,15 @@ def test_check_spec_rejects_unknown_configs():
         check_spec(RunSpec(dataset="requests", retrieval_configs=["closed_book"]))
     with pytest.raises(ValueError):
         check_spec(RunSpec(dataset="requests", stages=["latency"]))
+    with pytest.raises(ValueError):
+        check_spec(RunSpec(dataset="requests", retrieval_configs=["full@k=molti"]))
     check_spec(RunSpec(dataset="requests"))
+
+
+def test_any_config_can_fix_its_k():
+    assert runner.resolve_config("full@k=20") == (True, {"k": 20})
+    assert runner.resolve_config("naive@k=50") == runner.resolve_config("naive_budget")
+    check_spec(RunSpec(dataset="requests", retrieval_configs=["no_symbol_graph@k=8"], generation_configs=["full@k=20"]))
 
 
 def test_sample_is_stratified_and_reproducible():
@@ -96,19 +108,30 @@ def test_full_run_writes_all_artifacts(stubbed):
 
     retrieval = _rows("test-run", "retrieval.jsonl")
     assert len(retrieval) == 12  # 2 configurazioni x 6 domande (una per categoria)
-    assert sum("metrics" in row for row in retrieval) == 8  # panoramica e senza risposta non hanno gold
+    with_gold = [row for row in retrieval if "metrics" in row]
+    assert len(with_gold) == 8  # panoramica e senza risposta non hanno gold
+    # Per ogni simbolo atteso la riga dice dove e' finito: e' la base della diagnosi.
+    statuses = {item["status"] for row in with_gold for item in row["gold"]}
+    assert statuses <= {"search", "symbol", "same_file", "graph", "budget", "missing"} and "missing" in statuses
+    assert all(row["dropped"] == DROPPED and row["sources"][1]["origin"] == "graph" for row in retrieval)
 
     generation = _rows("test-run", "generation.jsonl")
     closed_book = [row for row in generation if row["config"] == "closed_book"]
-    assert closed_book and all(row["metrics"]["citation_in_context"] is None for row in closed_book)
-    assert all("total_s" not in row["metrics"] for row in closed_book)
+    assert closed_book and all("total_s" not in row["metrics"] for row in closed_book)
+    assert all("symbol_context_recall" not in row["metrics"] for row in closed_book)
     full = [row for row in generation if row["config"] == "full"]
-    assert full[0]["metrics"]["citation_exists"] == 0.5  # utils.py esiste, fake.py no
     assert all(row["metrics"]["total_s"] == 0.5 for row in full)  # tempi presi dalla stessa richiesta
+    assert all(row["metrics"]["answer_chars"] == len("Vedi src/requests/utils.py e fake.py") for row in full)
+    # Il recall del contesto serve a separare gli errori del retrieval da quelli del modello.
+    assert sum("symbol_context_recall" in row["metrics"] for row in full) == 4
 
     report = (run_dir / "report.md").read_text()
-    for heading in ("## Retrieval", "## Generazione", "## Latenza", "Ablation", "Campione: 6 domande"):
-        assert heading in report
+    for heading in (
+        "## Diagnosi", "## Retrieval", "### Dove finiscono i simboli attesi", "### Domande con simboli mancanti",
+        "## Generazione", "### Latenza", "Campione: 6 domande", "planner acceso",
+    ):
+        assert heading in report, heading
+    assert "**Simboli attesi** (`full`)" in report and "rispetto a `naive`" in report
     assert (run_dir / "summary.csv").exists()
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["dataset"]["commit"] == "abc1234567890"
@@ -173,21 +196,36 @@ def test_answers_are_exported_blind_and_external_judgments_feed_the_report(stubb
     assert set(keys) == {item["key"] for item in items}
     # Il contesto e' salvato solo per le risposte che ne hanno uno.
     assert {path.stem for path in (run_dir / "contexts").iterdir()} == {k for k, row in keys.items() if row["config"] == "full"}
-    assert "0 risposte giudicate" in (run_dir / "report.md").read_text()
+    assert "Risposte giudicate: 0" in (run_dir / "report.md").read_text()
 
     judgments = [
-        {"key": item["key"], "fact_verdicts": [True] * len(item["key_facts"]), "abstains": not item["key_facts"], "faithful": True}
+        {"key": item["key"], "fact_verdicts": [True] * len(item["key_facts"]), "abstains": not item["key_facts"]}
         for item in items
         if keys[item["key"]]["config"] == "full"
     ]
     judgments[0]["fact_verdicts"] = [True] * 9  # numero di verdetti sbagliato: scartato
+    wrong = next(j for j in judgments[1:] if j["fact_verdicts"])
+    wrong["fact_verdicts"][0] = False
+    wrong_fact = next(item["key_facts"][0] for item in items if item["key"] == wrong["key"])
     (run_dir / "judgments.jsonl").write_text("".join(json.dumps(j) + "\n" for j in judgments))
-    report.write_report(run_dir, run_dir / "human_labels.json")
+    report.write_report(run_dir)
 
     text = (run_dir / "report.md").read_text()
-    assert "5 risposte giudicate" in text
-    full_row = next(line for line in text.splitlines() if line.startswith("| full | 6 |"))
-    assert "1.00 [1.00, 1.00]" in full_row  # correttezza delle risposte giudicate
+    assert "Risposte giudicate: 5" in text
+    # Il fatto sbagliato e' elencato, e la correttezza e' separata per completezza del contesto.
+    assert "### Fatti sbagliati" in text and wrong_fact in text.split("### Fatti sbagliati")[1]
+    assert "### Retrieval o modello?" in text and "**Retrieval o modello?** (`full`)" in text
+
+
+def test_two_runs_are_compared_on_their_common_questions(stubbed):
+    spec = RunSpec(dataset="requests", per_category=1, stages=["retrieval"], retrieval_configs=["full", "naive"])
+    execute_run("compare-a", spec, client=FakeClient())
+    execute_run("compare-b", spec.model_copy(update={"retrieval_configs": ["full"]}), client=FakeClient())
+
+    text = report.compare_runs(runner.RESULTS_DIR / "compare-a", runner.RESULTS_DIR / "compare-b")
+    rows = [line for line in text.splitlines() if line.startswith("| symbol_")]
+    assert all("| full |" in row and "+0.00 [+0.00, +0.00]" in row for row in rows) and len(rows) >= 2
+    assert "naive" not in text  # solo le configurazioni presenti in entrambi i run
 
 
 def test_failed_answers_are_not_exported_for_judging(stubbed):
@@ -202,4 +240,4 @@ def test_failed_answers_are_not_exported_for_judging(stubbed):
     generation = _rows("failing-answers", "generation.jsonl")
     assert len(generation) == 6 and all(row["metrics"] == {"answer_error": 1.0} for row in generation)
     assert _rows("failing-answers", "to_judge.jsonl") == []
-    assert "## Latenza" not in (runner.RESULTS_DIR / "failing-answers" / "report.md").read_text()
+    assert "### Latenza" not in (runner.RESULTS_DIR / "failing-answers" / "report.md").read_text()

@@ -78,14 +78,14 @@ def health_check():
 
 @app.post("/retrieve")
 async def retrieve(request: RetrieveRequest) -> dict:
-    """Planner + retrieval senza generazione: restituisce sotto-domande e fonti."""
+    """Planner + retrieval senza generazione: sotto-domande, fonti e candidati esclusi dal contesto."""
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Il messaggio non puo' essere vuoto.")
-    subquestions, sources = await retrieve_only(
+    subquestions, sources, dropped = await retrieve_only(
         message, request.use_planner, request.retrieval, request.subquestions
     )
-    return {"subquestions": subquestions, "sources": sources}
+    return {"subquestions": subquestions, "sources": sources, "dropped": dropped}
 
 
 @app.post("/ask")

@@ -1,4 +1,4 @@
-"""Orchestrazione di un run: indicizzazione, stadi retrieval/generazione/latenza, report."""
+"""Orchestrazione di un run: indicizzazione, stadi di retrieval e generazione, report."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .dataset import (
     validate_dataset,
 )
 from .esperto_client import EspertoClient
-from .metrics import citation_stats, retrieval_metrics
+from .metrics import gold_status, retrieval_metrics
 
 logger = logging.getLogger("Benchmark")
 
@@ -44,9 +44,6 @@ CONFIGS: dict[str, tuple[bool, dict]] = {
     "no_symbol_graph": (True, {"use_symbol_graph": False}),
     "no_same_file": (True, {"use_same_file": False}),
     "no_symbol_lookup": (True, {"use_symbol_lookup": False}),
-    # Come `full` ma con un K fissato: per scegliere K senza cambiare la configurazione di esperto.
-    "full_k12": (True, {"k": 12}),
-    "full_k20": (True, {"k": 20}),
     "dense_only": (True, {"use_sparse": False}),
     "sparse_only": (True, {"use_dense": False}),
     "no_repo_map": (True, {"use_repo_map": False}),  # la mappa guida il planner e apre il prompt
@@ -58,10 +55,17 @@ CONFIGS: dict[str, tuple[bool, dict]] = {
 CLOSED_BOOK = "closed_book"  # LLM senza contesto: misura quanto il modello conosce gia' il repo
 
 
+def resolve_config(name: str) -> tuple[bool, dict]:
+    """(use_planner, opzioni) di una configurazione; `nome@k=N` ne fissa il K (es. `full@k=20`)."""
+    base, _, k = name.partition("@k=")
+    use_planner, options = CONFIGS[base]
+    return use_planner, {**options, "k": int(k)} if k else options
+
+
 class RunSpec(BaseModel):
     dataset: str
     stages: List[str] = ["retrieval", "generation"]
-    retrieval_configs: List[str] = [name for name in CONFIGS if not name.startswith("full_k")]
+    retrieval_configs: List[str] = list(CONFIGS)
     # La generazione e' lo stadio lento: di default solo sistema completo e le due baseline.
     generation_configs: List[str] = ["full", "naive", "naive_budget", CLOSED_BOOK]
     per_category: Optional[int] = 4  # domande estratte per categoria; None = tutto il gold set
@@ -71,10 +75,13 @@ class RunSpec(BaseModel):
 
 
 def check_spec(spec: RunSpec) -> None:
-    valid = set(CONFIGS) | {CLOSED_BOOK}
-    unknown = (set(spec.retrieval_configs) - set(CONFIGS)) | (set(spec.generation_configs) - valid)
-    if unknown or set(spec.stages) - {"retrieval", "generation"}:
-        raise ValueError(f"Configurazioni o stadi sconosciuti: {sorted(unknown) or spec.stages}")
+    for name in [*spec.retrieval_configs, *(n for n in spec.generation_configs if n != CLOSED_BOOK)]:
+        try:
+            resolve_config(name)
+        except (KeyError, ValueError):
+            raise ValueError(f"Configurazione sconosciuta: {name!r}") from None
+    if set(spec.stages) - {"retrieval", "generation"}:
+        raise ValueError(f"Stadi sconosciuti: {spec.stages}")
 
 
 def sample_questions(questions: list[Question], per_category: Optional[int], seed: int) -> list[Question]:
@@ -97,7 +104,7 @@ def _done(path: Path) -> set[tuple[str, str]]:
 
 
 def _compact(sources: list[dict]) -> list[dict]:
-    keys = ("filename", "symbol_name", "chunk_type", "start_line", "end_line", "chunk_id", "score", "graph_relation")
+    keys = ("filename", "symbol_name", "chunk_type", "start_line", "end_line", "chunk_id", "score", "origin", "graph_relation")
     return [{key: source.get(key) for key in keys} for source in sources]
 
 
@@ -156,7 +163,7 @@ def _retrieval_stage(client: EspertoClient, spec: RunSpec, questions: list[Quest
     # condividono: stessa scomposizione per tutte, e una sola chiamata al planner.
     plans: dict[str, list[str]] = {}
     for name in spec.retrieval_configs:
-        use_planner, options = CONFIGS[name]
+        use_planner, options = resolve_config(name)
         use_planner = use_planner and spec.planner
         shares_plan = use_planner and options.get("use_repo_map", True)
         for question in questions:
@@ -169,9 +176,16 @@ def _retrieval_stage(client: EspertoClient, spec: RunSpec, questions: list[Quest
                 result = client.retrieve(question.question, use_planner, options, plan)
                 if shares_plan:
                     plans.setdefault(question.id, result["subquestions"])
-                row.update(subquestions=result["subquestions"], sources=_compact(result["sources"]), seconds=result["seconds"])
+                sources, dropped = result["sources"], result.get("dropped", [])
+                row.update(
+                    subquestions=result["subquestions"], sources=_compact(sources), dropped=dropped,
+                    seconds=result["seconds"],
+                )
                 if question.relevant:
-                    row["metrics"] = retrieval_metrics(result["sources"], [r.model_dump() for r in question.relevant])
+                    relevant = [item.model_dump() for item in question.relevant]
+                    row["metrics"] = {**retrieval_metrics(sources, relevant), "seconds": result["seconds"]}
+                    # Dove finisce ogni simbolo atteso: e' la base della diagnosi del report.
+                    row["gold"] = gold_status(sources, dropped, relevant)
             except (httpx.HTTPError, KeyError, ValueError) as error:
                 row["error"] = f"{type(error).__name__}: {error}"
             _append(run_dir / "retrieval.jsonl", row)
@@ -207,19 +221,18 @@ def _generate(client: EspertoClient, spec: RunSpec, dataset: Dataset, question: 
     if name == CLOSED_BOOK:
         prompt = f"Rispondi in italiano a questa domanda sul progetto Python '{dataset.name}':\n{question.question}"
         return {"answer": ollama.chat(prompt, model=LLM_MODEL), "sources": []}
-    use_planner, options = CONFIGS[name]
+    use_planner, options = resolve_config(name)
     return client.ask(question.question, use_planner and spec.planner, options)
 
 
 def _generation_stage(
-    client: EspertoClient, spec: RunSpec, dataset: Dataset, questions: list[Question],
-    repo_files: list[str], run_dir: Path, status: _Status,
+    client: EspertoClient, spec: RunSpec, dataset: Dataset, questions: list[Question], run_dir: Path, status: _Status
 ) -> None:
     status.update(stage="generation", done=0, total=len(spec.generation_configs) * len(questions))
     done = _done(run_dir / "generation.jsonl")
     if set(spec.generation_configs) - {CLOSED_BOOK}:
         # Carica BGE-M3 e il modello prima di misurare i tempi; se fallisce, il run si ferma subito.
-        warmup = client.ask(questions[0].question, *CONFIGS["full"])
+        warmup = client.ask(questions[0].question, spec.planner, {})
         if warmup["error"]:
             raise RuntimeError(f"Esperto non risponde: {warmup['error']}")
     for name in spec.generation_configs:
@@ -231,23 +244,24 @@ def _generation_stage(
             try:
                 result = _generate(client, spec, dataset, question, name)
                 answer, sources = result["answer"], result["sources"]
-                # La mappa del repository e' nel prompt: il giudice di fedelta' deve vederla.
+                # La mappa del repository e' nel prompt: fa parte di cio' che il modello ha visto.
                 context = "\n\n---\n\n".join(
                     filter(None, [result.get("repo_map"), *(source["content"] for source in sources)])
                 )
                 row.update(answer=answer, sources=_compact(sources), error=result.get("error"))
                 if row["error"]:  # stream interrotto: una risposta parziale non va giudicata
                     raise ValueError(row["error"])
-                if context:  # serve a chi giudica la fedelta' della risposta
+                if context:  # per capire, davanti a un fatto sbagliato, se l'informazione c'era
                     contexts = run_dir / "contexts"
                     contexts.mkdir(exist_ok=True)
                     (contexts / f"{judging_key(run_dir.name, name, question.id)}.txt").write_text(context, encoding="utf-8")
-                citations = citation_stats(answer, repo_files, [s["filename"] for s in sources])
-                if name == CLOSED_BOOK:
-                    citations["citation_in_context"] = None
                 # I tempi vengono dalla stessa richiesta: nessuno stadio di latenza separato.
                 timings = {k: result[k] for k in ("retrieval_s", "ttft_s", "total_s") if result.get(k) is not None}
-                row["metrics"] = {**citations, **timings, "answer_error": 0.0}
+                row["metrics"] = {**timings, "answer_error": 0.0, "answer_chars": float(len(answer))}
+                if question.relevant and name != CLOSED_BOOK:
+                    # Serve a separare gli errori del retrieval da quelli del modello.
+                    relevant = [item.model_dump() for item in question.relevant]
+                    row["metrics"]["symbol_context_recall"] = retrieval_metrics(sources, relevant)["symbol_context_recall"]
             except (httpx.HTTPError, KeyError, ValueError) as error:
                 row["error"] = f"{type(error).__name__}: {error}"
                 row["metrics"] = {"answer_error": 1.0}
@@ -287,11 +301,11 @@ def execute_run(run_id: str, spec: RunSpec, client: Optional[EspertoClient] = No
         if "retrieval" in spec.stages:
             _retrieval_stage(client, spec, questions, run_dir, status)
         if "generation" in spec.stages:
-            _generation_stage(client, spec, dataset, questions, repo_files, run_dir, status)
+            _generation_stage(client, spec, dataset, questions, run_dir, status)
             _write_judging_file(run_dir, run_id, questions)
 
         status.update(stage="report")
-        report.write_report(run_dir, DATASETS_DIR / dataset.name / "human_labels.json")
+        report.write_report(run_dir)
         status.update(status="done", stage="done")
     except Exception as error:  # il thread non deve morire in silenzio: l'errore va in status.json
         logger.exception("Run %s fallito", run_id)

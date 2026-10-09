@@ -1,93 +1,73 @@
-import math
-
 import pytest
 
 from src.metrics import (
     bootstrap_ci,
-    citation_stats,
-    cohens_kappa,
-    hit_at_k,
-    ndcg_at_k,
+    gold_status,
     paired_bootstrap_diff,
     percentile,
-    precision_at_k,
-    recall_at_k,
     reciprocal_rank,
     retrieval_metrics,
-    unique_in_order,
+    share,
+    symbol_key,
 )
 
-RANKED = ["a", "b", "c", "d"]
-RELEVANT = {"b", "d", "z"}
+
+def _source(filename: str, symbol: str, origin: str = "search") -> dict:
+    return {"filename": filename, "symbol_name": symbol, "origin": origin, "content": "x" * 10}
 
 
-def test_hit_recall_precision_at_k():
-    assert hit_at_k(RANKED, RELEVANT, 1) == 0.0
-    assert hit_at_k(RANKED, RELEVANT, 2) == 1.0
-    assert recall_at_k(RANKED, RELEVANT, 4) == pytest.approx(2 / 3)
-    assert precision_at_k(RANKED, RELEVANT, 4) == 0.5
-    assert precision_at_k([], RELEVANT, 3) == 0.0
+SOURCES = [
+    _source("a.py", "helper"),
+    _source("a.py", "Session.send", "same_file"),
+    _source("a.py", "Session", "graph"),
+    _source("b.py", "get", "symbol"),
+]
+RELEVANT = [
+    {"file": "a.py", "symbol": "Session", "hop": 1},
+    {"file": "c.py", "symbol": "cut", "hop": 2},
+    {"file": "d.py", "symbol": "lost", "hop": 2},
+]
+
+
+def test_a_method_counts_for_its_class():
+    assert symbol_key(_source("a.py", "Session.send")) == "a.py::Session"
+    assert symbol_key({"filename": "notes.md", "symbol_name": None}) == "notes.md::"
 
 
 def test_reciprocal_rank():
-    assert reciprocal_rank(RANKED, RELEVANT) == 0.5
-    assert reciprocal_rank(["x"], RELEVANT) == 0.0
+    assert reciprocal_rank(["a", "b", "c"], {"b", "z"}) == 0.5
+    assert reciprocal_rank(["x"], {"b"}) == 0.0
 
 
-def test_ndcg_matches_hand_computation():
-    dcg = 1 / math.log2(3) + 1 / math.log2(5)  # rilevanti in posizione 2 e 4
-    ideal = 1 / math.log2(2) + 1 / math.log2(3) + 1 / math.log2(4)  # 3 rilevanti, k=10 -> 3 posizioni
-    assert ndcg_at_k(RANKED, RELEVANT, 10) == pytest.approx(dcg / ideal)
-    assert ndcg_at_k(["b"], {"b"}, 5) == 1.0
-
-
-def test_unique_in_order():
-    assert unique_in_order(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
-
-
-def _source(filename, symbol):
-    return {"filename": filename, "symbol_name": symbol}
-
-
-def test_retrieval_metrics_file_and_symbol_levels():
-    sources = [_source("f1.py", "A"), _source("f2.py", "B"), _source("f1.py", "C")]
-    relevant = [
-        {"file": "f1.py", "symbol": "C", "hop": 1},
-        {"file": "f3.py", "symbol": "Z", "hop": 2},
-    ]
-    metrics = retrieval_metrics(sources, relevant)
-    assert metrics["file_hit@1"] == 1.0  # f1.py e' in prima posizione
-    assert metrics["file_recall@5"] == 0.5  # f3.py manca
-    assert metrics["symbol_hit@1"] == 0.0  # il primo simbolo e' f1.py::A, non rilevante
-    assert metrics["symbol_hit@3"] == 1.0
-    assert metrics["symbol_mrr"] == pytest.approx(1 / 3)
-    assert metrics["symbol_context_recall"] == 0.5
+def test_retrieval_metrics():
+    metrics = retrieval_metrics(SOURCES, RELEVANT)
+    assert metrics["symbol_mrr"] == 0.5  # a.py::Session e' il secondo simbolo distinto
+    assert metrics["symbol_context_recall"] == pytest.approx(1 / 3)
     assert metrics["hop2_symbol_recall"] == 0.0
-    assert metrics["n_sources"] == 3.0
+    assert metrics["n_sources"] == 4 and metrics["context_chars"] == 40
+    assert set(metrics) == {"symbol_mrr", "symbol_context_recall", "hop2_symbol_recall", "n_sources", "context_chars"}
 
 
-def test_retrieval_metrics_without_hop2_is_none():
-    metrics = retrieval_metrics([_source("f.py", "A")], [{"file": "f.py", "symbol": "A"}])
-    assert metrics["hop2_symbol_recall"] is None
+def test_retrieval_metrics_without_hop2_or_sources():
+    assert retrieval_metrics(SOURCES, RELEVANT[:1])["hop2_symbol_recall"] is None
+    empty = retrieval_metrics([], RELEVANT)
+    assert empty["symbol_mrr"] == 0.0 and empty["symbol_context_recall"] == 0.0
 
 
-def test_retrieval_metrics_with_no_sources():
-    metrics = retrieval_metrics([], [{"file": "f.py", "symbol": "A"}])
-    assert metrics["symbol_context_recall"] == 0.0
-    assert metrics["symbol_mrr"] == 0.0
+def test_gold_status_says_where_each_expected_symbol_ends_up():
+    dropped = [{"filename": "c.py", "symbol_name": "cut.inner", "origin": "search"}]
+    statuses = {item["symbol"]: item["status"] for item in gold_status(SOURCES, dropped, RELEVANT)}
+    assert statuses == {
+        "a.py::Session": "same_file",  # trovato da due stadi: vale il piu' semplice
+        "c.py::cut": "budget",  # tra i candidati, ma fuori dal contesto
+        "d.py::lost": "missing",  # mai trovato
+    }
+    assert [item["hop"] for item in gold_status(SOURCES, dropped, RELEVANT)] == [1, 2, 2]
 
 
-def test_citation_stats():
-    repo = ["src/requests/utils.py", "src/requests/api.py"]
-    sources = ["src/requests/utils.py"]
-    answer = "Vedi `src/requests/utils.py`, api.py e fake_module.py."
-    stats = citation_stats(answer, repo, sources)
-    assert stats["citation_exists"] == pytest.approx(2 / 3)
-    assert stats["citation_in_context"] == pytest.approx(1 / 3)
-
-
-def test_citation_stats_without_citations():
-    assert citation_stats("nessun file", [], []) == {"citation_exists": None, "citation_in_context": None}
+def test_share():
+    assert share(["search", "graph", "missing", "budget"], ["search", "graph"]) == 0.5
+    assert share([], ["search"]) == 0.0
 
 
 def test_percentile_interpolates():
@@ -107,13 +87,5 @@ def test_bootstrap_ci_degenerate_sample():
 
 
 def test_paired_bootstrap_diff_detects_consistent_gain():
-    a = [1.0] * 10
-    b = [0.0] * 10
-    diff, low, high = paired_bootstrap_diff(a, b)
+    diff, low, high = paired_bootstrap_diff([1.0] * 10, [0.0] * 10)
     assert diff == 1.0 and low == 1.0 and high == 1.0
-
-
-def test_cohens_kappa():
-    assert cohens_kappa([True, False, True, False], [True, False, True, False]) == 1.0
-    assert cohens_kappa([True, True, False, False], [True, False, True, False]) == 0.0
-    assert cohens_kappa([True, True], [True, True]) is None

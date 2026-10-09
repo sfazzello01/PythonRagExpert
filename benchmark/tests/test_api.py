@@ -12,6 +12,7 @@ def test_health():
 def test_unknown_or_malicious_run_id_is_404():
     assert client.get("/runs/does-not-exist").status_code == 404
     assert client.get("/runs/..%2Fetc").status_code == 404
+    assert client.get("/runs/does-not-exist/compare/neither").status_code == 404
 
 
 def test_start_run_validates_the_spec():

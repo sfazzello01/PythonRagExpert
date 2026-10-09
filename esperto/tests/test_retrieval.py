@@ -73,7 +73,7 @@ def _retrieve(options=RetrievalOptions(), questions=("sotto-domanda",), related=
         return related or {}
 
     retriever._symbol_graph = SimpleNamespace(related_chunks=related_chunks, chunks_named=lambda text: list(named))
-    sources = asyncio.run(retriever.retrieve(list(questions), "domanda", options))
+    sources, client.dropped = asyncio.run(retriever.retrieve(list(questions), "domanda", options))
     return client, sources
 
 
@@ -163,3 +163,18 @@ def test_budget_counts_module_imports_once_per_file():
     size = len(documents[0].page_content)
     # Tre chunk interi non entrerebbero: il secondo e il terzo contano senza il blocco degli import.
     assert len(retrieval._apply_context_budget(documents, 10, size * 2)) == 3
+
+
+def test_sources_carry_their_origin_and_budget_cuts_are_reported(encoded, monkeypatch):
+    _, sources = _retrieve(named=["noise"], related={"extra": "calls"})
+    # Ogni fonte dice quale stadio l'ha portata tra i candidati; "extra" non esiste nell'indice.
+    assert {source["chunk_id"]: source["origin"] for source in sources} == {
+        "noise": "symbol", "top": "search", "mid": "search", "low": "same_file",
+    }
+
+    monkeypatch.setattr(retrieval, "RAG_CONTEXT_MAX_SOURCES", 1)
+    client, sources = _retrieve()
+    assert [source["chunk_id"] for source in sources] == ["low"]
+    # I candidati tagliati dal budget sono riportati senza testo, con la loro origine.
+    assert {item["chunk_id"]: item["origin"] for item in client.dropped} == {"top": "search", "mid": "search"}
+    assert all("content" not in item for item in client.dropped)

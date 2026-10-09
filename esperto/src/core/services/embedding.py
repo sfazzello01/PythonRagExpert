@@ -19,7 +19,7 @@ from huggingface_hub import constants, hf_hub_download, snapshot_download
 from langchain_core.documents import Document
 from tokenizers import Tokenizer
 
-from config import DENSE_MODEL_NAME, EMBEDDING_INT8, EMBEDDING_MAX_LENGTH
+from config import DENSE_MODEL_NAME, EMBEDDING_INT8, EMBEDDING_MAX_LENGTH, INDEXER_GPU
 from ..shared.vectors import QueryVectors, lexical_weights_to_sparse_vector
 from .embedding_cache import EmbeddingCache
 
@@ -113,8 +113,44 @@ def _execution_providers() -> list[str]:
     return ["CPUExecutionProvider"]
 
 
+def _load_gpu_model() -> BGEM3Encoder | None:
+    """Create BGE-M3 on the NVIDIA GPU (PyTorch, fp16), or None where PyTorch or CUDA are missing."""
+    try:  # torch e transformers sono installati solo nell'immagine costruita con INDEXER_GPU=1
+        import torch
+        from transformers import AutoModel  # type: ignore
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    # Caricato da cartella locale: dato il nome del repository, che ha solo pytorch_model.bin,
+    # transformers ne scaricherebbe in background una conversione safetensors bloccando l'uscita.
+    model_dir = snapshot_download(DENSE_MODEL_NAME, allow_patterns=["config.json", "pytorch_model.bin"])
+    model = AutoModel.from_pretrained(model_dir).eval().half().to("cuda")
+
+    def forward(input_ids: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
+        with torch.inference_mode():
+            output = model(
+                input_ids=torch.from_numpy(input_ids).to("cuda"),
+                attention_mask=torch.from_numpy(attention_mask).to("cuda"),
+            )
+        return output.last_hidden_state.float().cpu().numpy()
+
+    logger.info("BGE-M3 caricato (%s, GPU, fp16).", DENSE_MODEL_NAME)
+    return BGEM3Encoder(forward)
+
+
 def load_indexing_model() -> BGEM3Encoder:
-    """Create the BGE-M3 model (ONNX Runtime, CPU) used by the one-shot indexing process."""
+    """Create the BGE-M3 model used by the one-shot indexing process, on GPU when INDEXER_GPU asks for it."""
+    if INDEXER_GPU:
+        model = _load_gpu_model()
+        if model is not None:
+            return model
+        logger.warning("INDEXER_GPU attivo ma PyTorch o CUDA non disponibili: indicizzazione su CPU.")
+    return _load_cpu_model()
+
+
+def _load_cpu_model() -> BGEM3Encoder:
+    """Create the BGE-M3 model on CPU with ONNX Runtime."""
     model_dir = Path(snapshot_download(DENSE_MODEL_NAME, allow_patterns=["onnx/*"])) / "onnx"
     model_file = str(_quantized_model(model_dir) if EMBEDDING_INT8 else model_dir / "model.onnx")
     providers = _execution_providers()
@@ -140,7 +176,7 @@ def get_query_model() -> BGEM3Encoder:
     global _query_model
     with _query_model_lock:  # richieste concorrenti non devono caricare il modello piu' volte
         if _query_model is None:
-            _query_model = load_indexing_model()
+            _query_model = _load_cpu_model()
     return _query_model
 
 

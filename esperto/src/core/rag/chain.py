@@ -99,10 +99,11 @@ async def retrieve_only(
     use_planner: bool = True,
     options: RetrievalOptions = RetrievalOptions(),
     subquestions: list[str] | None = None,
-) -> tuple[list[str], list[dict]]:
-    """Run planner + retrieval without generation; returns (subquestions, sources).
+) -> tuple[list[str], list[dict], list[dict]]:
+    """Run planner + retrieval without generation; returns (subquestions, sources, dropped).
 
     Con `subquestions` il planner non viene chiamato: si riusa un piano gia' calcolato.
+    `dropped` sono i candidati rimasti fuori dal contesto (diagnostica per il benchmark).
     """
     if subquestions is None:
         subquestions = (
@@ -110,7 +111,8 @@ async def retrieve_only(
             if use_planner
             else [question]
         )
-    return subquestions, await _get_retriever().retrieve(subquestions, question, options)
+    sources, dropped = await _get_retriever().retrieve(subquestions, question, options)
+    return subquestions, sources, dropped
 
 
 async def stream_expert_response(
@@ -120,7 +122,7 @@ async def stream_expert_response(
     options: RetrievalOptions = RetrievalOptions(),
 ):
     """Yield sources metadata then generated answer chunks for the API streaming response."""
-    subquestions, sources = await retrieve_only(question, use_planner, options)
+    subquestions, sources, _ = await retrieve_only(question, use_planner, options)
     context = _build_context(sources)
     repo_map = _repo_map() if options.use_repo_map else ""
     yield json.dumps(
