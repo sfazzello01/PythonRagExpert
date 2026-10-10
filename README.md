@@ -54,7 +54,7 @@ cp .env.example .env
 docker compose --profile esperto up -d --build
 
 # 3. Download del modello indicato in LLM_MODEL (solo la prima volta)
-docker exec ollama ollama pull gemma3:4b
+docker exec ollama ollama pull qwen3.5:4b
 ```
 
 Poi:

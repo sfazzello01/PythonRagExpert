@@ -433,6 +433,7 @@ document.addEventListener("DOMContentLoaded", () => {
             let reasoningText  = "";
             let eventBuffer    = "";
             let answerStarted  = false;
+            let streamError    = "";
 
             /**
              * Elabora un blocco dello stream: un evento JSON per riga (fonti, ragionamento, risposta).
@@ -446,33 +447,41 @@ document.addEventListener("DOMContentLoaded", () => {
                 eventBuffer += text;
                 const lines = eventBuffer.split("\n");
                 eventBuffer = lines.pop();
-                lines.forEach((line) => {
-                    if(!line){
-                        return;
-                    }
-                    try{
-                        const event = JSON.parse(line);
-                        if(event.type === "sources"){
-                            displaySources(event.data.sources || event.data.files);
-                            displaySubquestions(event.data.subquestions);
-                        } else if(event.type === "reasoning" && !answerStarted){
-                            reasoningText += event.data;
-                            reasoning.textContent = reasoningText;
-                            reasoning.hidden = false;
-                        } else if(event.type === "answer"){
-                            if(!answerStarted){
-                                answerStarted = true;
-                                reasoning.textContent = "";
-                                reasoning.hidden = true;
-                            }
-                            answerText += event.data;
-                            renderMarkdown(answerText);
-                        }
-                    } catch(err){
-                        console.warn("Evento stream non valido", err);
-                    }
-                });
+                lines.forEach(processLine);
                 answer.scrollTop = answer.scrollHeight;
+            }
+
+            /**
+             * Elabora una riga dello stream; una riga che non è JSON è un errore emesso a metà risposta.
+             * @param {string} line Riga completa ricevuta dallo stream.
+             */
+            function processLine(line){
+                if(!line.trim()){
+                    return;
+                }
+                let event;
+                try{
+                    event = JSON.parse(line);
+                } catch(err){
+                    streamError = line.replace(/^\[ERROR\]\s*/, "").trim();
+                    return;
+                }
+                if(event.type === "sources"){
+                    displaySources(event.data.sources || event.data.files);
+                    displaySubquestions(event.data.subquestions);
+                } else if(event.type === "reasoning" && !answerStarted){
+                    reasoningText += event.data;
+                    reasoning.textContent = reasoningText;
+                    reasoning.hidden = false;
+                } else if(event.type === "answer"){
+                    if(!answerStarted){
+                        answerStarted = true;
+                        reasoning.textContent = "";
+                        reasoning.hidden = true;
+                    }
+                    answerText += event.data;
+                    renderMarkdown(answerText);
+                }
             }
 
             while(true){
@@ -480,13 +489,23 @@ document.addEventListener("DOMContentLoaded", () => {
                 const { done, value } = await reader.read();
                 if(done){
                     processChunk(decoder.decode());
+                    processLine(eventBuffer);  // ultima riga, se lo stream non termina con un a capo
                     break;
                 }
 
                 processChunk(decoder.decode(value, { stream: true }));
             }
 
-            status.textContent = "Completata";
+            if(streamError){
+                // La risposta parziale resta visibile: l'errore è mostrato a parte.
+                UI.notify(streamError, "error");
+                if(!answerText){
+                    answerOutput.textContent = streamError;
+                }
+                status.textContent = "Errore";
+            } else {
+                status.textContent = "Completata";
+            }
 
         } catch(err){
 
