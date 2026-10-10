@@ -232,9 +232,9 @@ hf_cache/
 # Esperto persistent index state
 esperto_state/
 
-# Benchmark output
+# Benchmark
+benchmark/
 benchmark_results/
 
 # Test (restano in locale, fuori dal repository)
 esperto/tests/
-benchmark/tests/
