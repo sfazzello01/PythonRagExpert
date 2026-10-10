@@ -34,17 +34,24 @@ _current_job: dict | None = None
 
 
 def _load_job() -> dict | None:
+    """Carica lo stato del job corrente, dalla memoria o dal file di stato.
+
+    Un job rimasto in coda o in corso da un avvio precedente viene marcato come fallito.
+
+    Returns:
+        Il job corrente, oppure None se non ne è mai stato avviato uno.
+    """
     global _current_job
     if _current_job is not None:
         return _current_job
     if _STATE_FILE.exists():
         try:
             _current_job = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning("Stato job non leggibile: %s", e)
+        except Exception as error:
+            logger.warning("Stato job non leggibile: %s", error)
             _current_job = None
-    # Un job rimasto in queued/indexing da un run precedente e' morto con il
-    # processo (il thread e' daemon): va marcato come errore, altrimenti ogni
+    # Un job rimasto in queued/indexing da un run precedente è morto con il
+    # processo (il thread è daemon): va marcato come errore, altrimenti ogni
     # nuovo upload verrebbe rifiutato con 409 per sempre.
     if _current_job is not None and _current_job.get("status") in (JOB_QUEUED, JOB_INDEXING):
         _current_job = {
@@ -58,6 +65,11 @@ def _load_job() -> dict | None:
 
 
 def _save_job(job: dict) -> None:
+    """Rende corrente un job e ne salva lo stato su file.
+
+    Args:
+        job: Stato del job.
+    """
     global _current_job
     _current_job = job
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -65,7 +77,11 @@ def _save_job(job: dict) -> None:
 
 
 def current_job_status() -> dict:
-    """Restituisce lo stato del job corrente (o not_indexed se assente)."""
+    """Restituisce lo stato del job corrente.
+
+    Returns:
+        Lo stato del job e i suoi dettagli; `not_indexed` senza dettagli se non esiste alcun job.
+    """
     with _STATE_LOCK:
         job = _load_job()
         if job is None:
@@ -74,15 +90,14 @@ def current_job_status() -> dict:
 
 
 def extract_to_workspace(content: bytes, names: list[str]) -> Path:
-    """
-    Estrae i file validati in una directory di staging sotto la workspace.
+    """Estrae i file validati in una cartella di staging della workspace.
 
     Args:
         content: Contenuto binario dello ZIP.
-        names: Nomi dei file gia' validati da zip_validation.validate_zip.
+        names: Nomi dei file già validati da `zip_validation.validate_zip`.
 
     Returns:
-        Path della directory di staging creata.
+        La cartella di staging creata.
     """
     staging = WORKSPACE_ROOT / f"job-{uuid.uuid4().hex[:12]}"
     staging.mkdir(parents=True, exist_ok=False)
@@ -103,7 +118,11 @@ def extract_to_workspace(content: bytes, names: list[str]) -> Path:
 
 
 def _activate(staging: Path) -> None:
-    """Attiva atomicamente la directory di staging e rimuove le estrazioni precedenti."""
+    """Attiva atomicamente la cartella di staging e rimuove le estrazioni precedenti.
+
+    Args:
+        staging: Cartella della codebase appena indicizzata.
+    """
     tmp_link = WORKSPACE_ROOT / ".current.tmp"
     if tmp_link.exists() or tmp_link.is_symlink():
         tmp_link.unlink()
@@ -115,14 +134,16 @@ def _activate(staging: Path) -> None:
 
 
 def _run_indexer_subprocess(staging: Path) -> tuple[bool, str]:
-    """
-    Lancia la pipeline di indicizzazione come processo separato con env override.
+    """Lancia la pipeline di indicizzazione in un processo separato.
 
-    La configurazione dell'indicizzazione viene risolta a import-time, quindi
-    l'override di BASE_DIR deve avvenire in un processo nuovo.
+    La configurazione dell'indicizzazione è risolta all'import: per cambiare BASE_DIR serve un processo
+    nuovo.
+
+    Args:
+        staging: Cartella della codebase da indicizzare.
 
     Returns:
-        (successo, output_coda) tupla con esito e ultime righe di log.
+        L'esito (True se il processo è terminato senza errori) e le ultime righe del suo log.
     """
     env = os.environ.copy()
     env["BASE_DIR"] = str(staging)
@@ -133,28 +154,32 @@ def _run_indexer_subprocess(staging: Path) -> tuple[bool, str]:
             env=env,
             capture_output=True,
             text=True,
-            timeout=None,
         )
-    except Exception as e:
-        return False, f"Avvio indicizzatore fallito: {e}"
+    except Exception as error:
+        return False, f"Avvio indicizzatore fallito: {error}"
 
     tail = (result.stderr or result.stdout or "")[-4000:]
     return result.returncode == 0, tail
 
 
 def start_index_job(content: bytes, names: list[str], filename: str) -> dict:
-    """
-    Registra e avvia in background un job di indicizzazione per lo ZIP caricato.
+    """Registra e avvia in background un job di indicizzazione per lo ZIP caricato.
+
+    Args:
+        content: Contenuto binario dello ZIP.
+        names: Nomi dei file validati da estrarre.
+        filename: Nome originale dell'archivio.
+
+    Returns:
+        Il job appena registrato, nello stato `queued`.
 
     Raises:
-        RuntimeError: Se un job e' gia' in corso (queued o indexing).
+        RuntimeError: Se un job è già in coda o in corso.
     """
     with _STATE_LOCK:
         existing = _load_job()
         if existing is not None and existing["status"] in (JOB_QUEUED, JOB_INDEXING):
-            raise RuntimeError(
-                f"Indicizzazione gia' in corso (job {existing['job_id']})"
-            )
+            raise RuntimeError(f"Indicizzazione già in corso (job {existing['job_id']})")
 
         job = {
             "job_id": uuid.uuid4().hex[:12],
@@ -167,16 +192,17 @@ def start_index_job(content: bytes, names: list[str], filename: str) -> dict:
         }
         _save_job(job)
 
-    thread = threading.Thread(
-        target=_execute_job,
-        args=(job["job_id"], content, names),
-        daemon=True,
-    )
-    thread.start()
+    threading.Thread(target=_execute_job, args=(job["job_id"], content, names), daemon=True).start()
     return job
 
 
 def _update_job(job_id: str, **fields) -> None:
+    """Aggiorna i campi del job corrente, se è ancora quello indicato.
+
+    Args:
+        job_id: ID del job da aggiornare.
+        **fields: Campi da modificare.
+    """
     with _STATE_LOCK:
         job = _load_job()
         if job is None or job["job_id"] != job_id:
@@ -186,6 +212,13 @@ def _update_job(job_id: str, **fields) -> None:
 
 
 def _execute_job(job_id: str, content: bytes, names: list[str]) -> None:
+    """Esegue un job: estrae i file, lancia l'indicizzazione e ne registra l'esito.
+
+    Args:
+        job_id: ID del job.
+        content: Contenuto binario dello ZIP.
+        names: Nomi dei file validati da estrarre.
+    """
     staging: Path | None = None
     try:
         _update_job(job_id, status=JOB_INDEXING)
@@ -215,13 +248,8 @@ def _execute_job(job_id: str, content: bytes, names: list[str]) -> None:
                 indexing_seconds=indexing_seconds,
             )
             logger.error("Job %s fallito: %s", job_id, log_tail[-500:])
-    except Exception as e:
+    except Exception as error:
         logger.exception("Job %s fallito con eccezione.", job_id)
-        _update_job(
-            job_id,
-            status=JOB_ERROR,
-            finished_at=time.time(),
-            error=str(e),
-        )
+        _update_job(job_id, status=JOB_ERROR, finished_at=time.time(), error=str(error))
         if staging is not None and staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

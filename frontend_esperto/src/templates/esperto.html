@@ -171,6 +171,10 @@ document.addEventListener("DOMContentLoaded", () => {
     let currentController = null;
     let statusPollTimer   = null;
 
+    /**
+     * Mostra lo stato di indexer ed esperto nella riga di stato dell'indice.
+     * @param {object|null} data Risposta di `/api/status`; null se il servizio non è raggiungibile.
+     */
     function renderIndexStatus(data){
         if(!data){
             indexStatus.textContent = "Stato indice: servizio non raggiungibile.";
@@ -190,6 +194,10 @@ document.addEventListener("DOMContentLoaded", () => {
         indexStatus.textContent = `Stato indice: ${parts.join(" | ") || "sconosciuto"}`;
     }
 
+    /**
+     * Legge lo stato da `/api/status` e aggiorna la riga di stato dell'indice.
+     * @returns {Promise<object|null>} Lo stato letto, oppure null se la richiesta fallisce.
+     */
     async function refreshIndexStatus(){
         try{
             const response = await fetch("/api/status");
@@ -205,6 +213,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    /**
+     * Aggiorna lo stato ogni cinque secondi finché l'indicizzazione è in corso.
+     */
     function startStatusPolling(){
         if(statusPollTimer){
             return;
@@ -260,6 +271,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
+    /**
+     * Mostra la risposta convertendo il Markdown in HTML sanificato; se la conversione fallisce mostra il testo.
+     * @param {string} text Risposta ricevuta finora.
+     */
     function renderMarkdown(text){
         try{
             if(window.marked){
@@ -274,6 +289,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    /**
+     * Elenca le fonti usate per la risposta, ciascuna con i metadati e il contenuto espandibile.
+     * @param {Array<object>} sources Fonti restituite dall'esperto.
+     */
     function displaySources(sources){
         sourcesList.innerHTML = "";
         if(!sources || sources.length === 0){
@@ -325,6 +344,10 @@ document.addEventListener("DOMContentLoaded", () => {
         sourcesItem.style.display = "block";
     }
 
+    /**
+     * Elenca le sotto-domande prodotte dal planner.
+     * @param {Array<string>} subquestions Sotto-domande usate per il retrieval.
+     */
     function displaySubquestions(subquestions){
         plannerList.innerHTML = "";
         if(!subquestions || subquestions.length === 0){
@@ -411,6 +434,10 @@ document.addEventListener("DOMContentLoaded", () => {
             let eventBuffer    = "";
             let answerStarted  = false;
 
+            /**
+             * Elabora un blocco dello stream: un evento JSON per riga (fonti, ragionamento, risposta).
+             * @param {string} text Testo ricevuto, che può terminare a metà di una riga.
+             */
             function processChunk(text){
                 if(!text){
                     return;

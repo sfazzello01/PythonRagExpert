@@ -1,14 +1,12 @@
-"""Per-request switches for retrieval stages; defaults reproduce the production pipeline."""
+"""Interruttori per richiesta degli stadi di retrieval; i valori predefiniti riproducono la pipeline completa."""
 
 from __future__ import annotations
-
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class RetrievalOptions(BaseModel):
-    """Disable individual retrieval stages (used by the benchmark ablations)."""
+    """Disattiva singoli stadi del retrieval (usato dalle ablation del benchmark)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -16,4 +14,4 @@ class RetrievalOptions(BaseModel):
     use_symbol_graph: bool = True
     use_symbol_lookup: bool = True  # chunk dei simboli nominati nella domanda
     use_repo_map: bool = True
-    k: Optional[int] = Field(default=None, ge=1, le=50)  # None = K di configurazione
+    k: int | None = Field(default=None, ge=1, le=50)  # None = K di configurazione

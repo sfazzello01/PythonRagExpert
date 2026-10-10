@@ -1,10 +1,13 @@
+"""Configurazione del logging del frontend: file di log e console."""
+
 import logging
-from config import (
-    LOGS_DIR,
-    LOGS_FILE
-)
+
+from config import LOGS_DIR, LOGS_FILE
+
 
 class LoggerConfig:
+    """Impostazioni condivise dai logger del frontend; alla definizione crea la cartella dei log."""
+
     LOG_DIR = LOGS_DIR
     LOG_DIR.mkdir(exist_ok=True)
     LOG_FILE = LOGS_FILE
@@ -16,14 +19,13 @@ class LoggerConfig:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Configura e restituisce un logger con nome specificato.
+    """Restituisce un logger che scrive su file e console, configurandolo al primo uso.
 
     Args:
-        name: Nome del logger (str).
+        name: Nome del logger.
 
     Returns:
-        Logger configurato (logging.Logger).
+        Il logger configurato.
     """
     logger = logging.getLogger(name)
 
@@ -33,10 +35,7 @@ def get_logger(name: str) -> logging.Logger:
     logger.setLevel(LoggerConfig.LOG_LEVEL)
     logger.propagate = False
 
-    file_handler = logging.FileHandler(
-        LoggerConfig.LOG_FILE, mode="a", encoding="utf-8"
-    )
-
+    file_handler = logging.FileHandler(LoggerConfig.LOG_FILE, mode="a", encoding="utf-8")
     file_handler.setLevel(LoggerConfig.LOG_LEVEL)
     file_handler.setFormatter(LoggerConfig.LOG_FORMAT)
 
@@ -48,6 +47,3 @@ def get_logger(name: str) -> logging.Logger:
     logger.addHandler(console_handler)
 
     return logger
-
-
-logger = get_logger(__name__)

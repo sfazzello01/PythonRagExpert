@@ -1,4 +1,4 @@
-"""Qdrant collection management, ingestion, and dense-search primitives."""
+"""Gestione delle collection Qdrant, caricamento dei chunk e ricerca densa."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from langchain_core.documents import Document
 from qdrant_client import AsyncQdrantClient, QdrantClient  # type: ignore
@@ -38,27 +38,40 @@ from config import (
 
 logger = logging.getLogger("EspertoQdrant")
 
-# Con scalar quantization attiva, rescore sui vettori originali per la qualita'.
+# Con scalar quantization attiva, rescore sui vettori originali per la qualità.
 _QUANTIZATION_PARAMS = SearchParams(
     quantization=QuantizationSearchParams(ignore=False, rescore=True, oversampling=2.0)
 )
 
 
 def get_sync_client() -> QdrantClient:
-    """Create the synchronous client used by the indexing and health-check paths."""
+    """Crea il client sincrono usato dall'indicizzazione e dal controllo di stato.
+
+    Returns:
+        Il client Qdrant sincrono.
+    """
     return QdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}")
 
 
 def get_async_client() -> AsyncQdrantClient:
-    """Create the asynchronous client used by request-time retrieval."""
+    """Crea il client asincrono usato dal retrieval durante le richieste.
+
+    Returns:
+        Il client Qdrant asincrono.
+    """
     return AsyncQdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}")
 
 
-async def get_documents_by_chunk_ids(
-    client: AsyncQdrantClient,
-    chunk_ids: list[str],
-) -> list[Document]:
-    """Retrieve indexed source chunks by their stable application-level IDs."""
+async def get_documents_by_chunk_ids(client: AsyncQdrantClient, chunk_ids: list[str]) -> list[Document]:
+    """Legge i chunk indicizzati a partire dai loro ID applicativi.
+
+    Args:
+        client: Client Qdrant asincrono.
+        chunk_ids: ID dei chunk da leggere.
+
+    Returns:
+        I chunk trovati, nell'ordine degli ID richiesti; quelli assenti dall'indice sono omessi.
+    """
     if not chunk_ids:
         return []
     records = await client.retrieve(
@@ -74,20 +87,23 @@ async def get_documents_by_chunk_ids(
         for record in records
         if (payload := record.payload)
     }
-    return [
-        documents_by_chunk_id[chunk_id]
-        for chunk_id in chunk_ids
-        if chunk_id in documents_by_chunk_id
-    ]
+    return [documents_by_chunk_id[chunk_id] for chunk_id in chunk_ids if chunk_id in documents_by_chunk_id]
 
 
 def wait_for_qdrant() -> QdrantClient:
-    """Wait up to sixty seconds for Qdrant to accept collection requests."""
+    """Attende fino a sessanta secondi che Qdrant risponda.
+
+    Returns:
+        Il client sincrono collegato.
+
+    Raises:
+        RuntimeError: Se Qdrant non risponde entro il tempo massimo.
+    """
     client = get_sync_client()
     for attempt in range(1, 31):
         try:
             client.get_collections()
-            logger.info("Qdrant e online e risponde.")
+            logger.info("Qdrant è online e risponde.")
             return client
         except Exception as error:
             logger.warning("Attesa Qdrant (%d/30): %s", attempt, error)
@@ -96,14 +112,25 @@ def wait_for_qdrant() -> QdrantClient:
 
 
 def has_active_collection(client: QdrantClient) -> bool:
-    """Return whether the QDRANT_COLLECTION alias points to a built index."""
+    """Indica se l'alias QDRANT_COLLECTION punta a un indice costruito.
+
+    Args:
+        client: Client Qdrant sincrono.
+
+    Returns:
+        True se l'alias esiste.
+    """
     return any(alias.alias_name == QDRANT_COLLECTION for alias in client.get_aliases().aliases)
 
 
 def activate_collection(client: QdrantClient, collection: str) -> None:
-    """Atomically point the QDRANT_COLLECTION alias to a new index and drop the previous ones.
+    """Sposta atomicamente l'alias QDRANT_COLLECTION su un nuovo indice ed elimina i precedenti.
 
     Le query usano sempre l'alias: fino allo scambio continuano a vedere l'indice precedente.
+
+    Args:
+        client: Client Qdrant sincrono.
+        collection: Nome della collection appena costruita.
     """
     names = [description.name for description in client.get_collections().collections]
     if QDRANT_COLLECTION in names:  # indice creato prima degli alias: il nome va liberato
@@ -122,7 +149,12 @@ def activate_collection(client: QdrantClient, collection: str) -> None:
 
 
 def create_collection(client: QdrantClient, collection: str) -> None:
-    """Create the collection of BGE-M3 dense vectors."""
+    """Crea la collection dei vettori densi BGE-M3, con quantizzazione scalare a 8 bit.
+
+    Args:
+        client: Client Qdrant sincrono.
+        collection: Nome della collection da creare.
+    """
     client.create_collection(
         collection_name=collection,
         vectors_config={
@@ -142,7 +174,14 @@ def create_collection(client: QdrantClient, collection: str) -> None:
 
 
 def _point_id(chunk_id: str) -> str:
-    """UUID deterministico (name-based) per il chunk_id applicativo."""
+    """Calcola l'ID del punto Qdrant di un chunk.
+
+    Args:
+        chunk_id: ID applicativo del chunk.
+
+    Returns:
+        Un UUID deterministico, basato sul nome.
+    """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"esperto:{chunk_id}"))
 
 
@@ -152,7 +191,19 @@ def upsert_encoded_documents(
     documents: Sequence[Document],
     dense_vectors: Sequence,
 ) -> None:
-    """Upsert documents with their dense vectors, falling back to individual requests if needed."""
+    """Carica i chunk con i loro vettori densi.
+
+    Se il batch supera la dimensione ammessa da Qdrant, i chunk sono caricati uno alla volta.
+
+    Args:
+        client: Client Qdrant sincrono.
+        collection: Collection di destinazione.
+        documents: Chunk da caricare.
+        dense_vectors: Vettori densi corrispondenti, nello stesso ordine.
+
+    Raises:
+        UnexpectedResponse: Se Qdrant rifiuta il caricamento per un motivo diverso dalla dimensione del batch.
+    """
     points = [
         PointStruct(
             id=_point_id(document.metadata["chunk_id"]),
@@ -175,14 +226,23 @@ async def dense_search(
     client: AsyncQdrantClient,
     query_vector: list[float],
     limit: int,
-    query_filter: Optional[Filter] = None,
+    query_filter: Filter | None = None,
     min_score_ratio: float = 0.0,
 ) -> list[Document]:
-    """I primi `limit` chunk per similarita' coseno con la domanda, esposta in `_score`.
+    """Cerca i chunk più simili alla domanda per similarità coseno.
 
-    Con `min_score_ratio` si scartano i chunk sotto quella quota della similarita' migliore.
-    Timeout ed errori di Qdrant si propagano: un contesto vuoto sarebbe indistinguibile da
-    "nessun risultato".
+    Timeout ed errori di Qdrant si propagano: un contesto vuoto sarebbe indistinguibile da "nessun
+    risultato".
+
+    Args:
+        client: Client Qdrant asincrono.
+        query_vector: Vettore denso della domanda.
+        limit: Numero massimo di chunk.
+        query_filter: Filtro che restringe la ricerca, ad esempio a un file.
+        min_score_ratio: Quota della similarità migliore sotto la quale un chunk viene scartato.
+
+    Returns:
+        I chunk in ordine di similarità, esposta nel metadato `_score`.
     """
     response = await asyncio.wait_for(
         client.query_points(
@@ -207,8 +267,19 @@ async def dense_search(
     ]
 
 
-async def rerank_chunk_ids(client: AsyncQdrantClient, query_vector: list[float], chunk_ids: list[str]) -> list[Document]:
-    """Score already-known chunk IDs against one query, so that they share a comparable score."""
+async def rerank_chunk_ids(
+    client: AsyncQdrantClient, query_vector: list[float], chunk_ids: list[str]
+) -> list[Document]:
+    """Valuta chunk già noti rispetto a una sola domanda, così da dare loro score confrontabili.
+
+    Args:
+        client: Client Qdrant asincrono.
+        query_vector: Vettore denso della domanda.
+        chunk_ids: ID dei chunk da valutare.
+
+    Returns:
+        I chunk in ordine di similarità, esposta nel metadato `_score`.
+    """
     if not chunk_ids:
         return []
     id_filter = Filter(must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])])

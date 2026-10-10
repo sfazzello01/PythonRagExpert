@@ -1,10 +1,17 @@
+"""Configurazione del servizio esperto, letta dalle variabili d'ambiente e validata all'avvio.
+
+Le costanti del modulo espongono i valori validati e quelli che ne derivano: budget del contesto,
+percorsi dei file di stato, versioni dell'indice.
+"""
+
 import os
 from pathlib import Path
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 class AppConfig(BaseModel):
-    """Validated application settings read from environment variables."""
+    """Impostazioni dell'applicazione lette dalle variabili d'ambiente e validate da pydantic."""
 
     model_config = ConfigDict(
         alias_generator=str.upper,
@@ -29,7 +36,7 @@ class AppConfig(BaseModel):
     batch_size: int = Field(ge=1, le=128)
     index_state_dir: Path
     dense_model_name: str = "BAAI/bge-m3"
-    # True: modello quantizzato a 8 bit (piu' veloce senza OpenVINO, vettori leggermente diversi).
+    # True: modello quantizzato a 8 bit (più veloce senza OpenVINO, vettori leggermente diversi).
     embedding_int8: bool = False
     # True: l'indexer codifica i chunk su GPU NVIDIA (PyTorch, fp16); richiede l'immagine costruita con INDEXER_GPU=1.
     indexer_gpu: bool = False
@@ -52,19 +59,35 @@ class AppConfig(BaseModel):
     @field_validator("supported_extensions", "skip_dirs", mode="before")
     @classmethod
     def parse_csv(cls, value: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        """Converte un elenco separato da virgole in una tupla di voci.
+
+        Args:
+            value: Stringa con le voci separate da virgole, oppure una sequenza già suddivisa.
+
+        Returns:
+            Le voci non vuote, ripulite dagli spazi.
+        """
         if isinstance(value, str):
             value = value.split(",")
         return tuple(item.strip() for item in value if item.strip())
 
 
 def _load_config_from_env() -> AppConfig:
+    """Legge e valida la configurazione dalle variabili d'ambiente.
+
+    Returns:
+        La configurazione validata.
+
+    Raises:
+        ValueError: Se una variabile obbligatoria manca o ha un valore non valido.
+    """
     try:
         return AppConfig.model_validate(os.environ)
-    except ValidationError as e:
-        raise ValueError(f"Invalid configuration: {e}")
+    except ValidationError as error:
+        raise ValueError(f"Configurazione non valida: {error}") from error
 
 
-# Load and validate config
+# La configurazione è letta e validata una sola volta, all'import del modulo.
 config = _load_config_from_env()
 
 OLLAMA_URL = config.ollama_url
@@ -117,5 +140,5 @@ INGESTION_WORKSPACE_DIR = config.ingestion_workspace_dir
 
 DENSE_DIMENSION = 1024
 SYMBOL_GRAPH_VERSION = 1
-# Da incrementare quando cambiano il chunking, i vettori salvati o la mappa: invalida gli indici gia' costruiti.
+# Da incrementare quando cambiano il chunking, i vettori salvati o la mappa: invalida gli indici già costruiti.
 CHUNKING_VERSION = 9

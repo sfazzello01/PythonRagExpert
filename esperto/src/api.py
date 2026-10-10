@@ -1,5 +1,8 @@
+"""API del servizio esperto: stato dell'indice, solo retrieval e risposta in streaming."""
+
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.responses import StreamingResponse  # type: ignore
@@ -7,11 +10,12 @@ from pydantic import BaseModel, Field
 
 from config import (
     INDEX_COMPLETE_FILE,
-    QDRANT_COLLECTION,
+    LLM_INFERENCE_TIMEOUT,
     MAX_MESSAGE_LENGTH,
     MIN_MESSAGE_LENGTH,
-    LLM_INFERENCE_TIMEOUT,
+    QDRANT_COLLECTION,
 )
+
 from .core.rag.chain import retrieve_only, stream_expert_response
 from .core.services.qdrant import get_sync_client
 from .core.shared.options import RetrievalOptions
@@ -23,65 +27,84 @@ app = FastAPI()
 
 
 class ChatRequest(BaseModel):
+    """Domanda per l'esperto, con gli interruttori di planner, ragionamento e stadi di retrieval."""
+
     message: str = Field(
         ...,
         min_length=MIN_MESSAGE_LENGTH,
         max_length=MAX_MESSAGE_LENGTH,
-        description="User question to the expert",
+        description="Domanda dell'utente per l'esperto",
     )
-    use_planner: bool = Field(default=True, description="Use the LLM retrieval planner")
-    use_reasoning: bool = Field(default=False, description="Stream the model reasoning before the answer")
-    retrieval: RetrievalOptions = Field(default_factory=RetrievalOptions, description="Retrieval stage switches (ablation)")
+    use_planner: bool = Field(default=True, description="Usa il planner LLM per scomporre la domanda")
+    use_reasoning: bool = Field(default=False, description="Trasmette il ragionamento del modello prima della risposta")
+    retrieval: RetrievalOptions = Field(
+        default_factory=RetrievalOptions, description="Interruttori degli stadi di retrieval (ablation)"
+    )
 
 
 class RetrieveRequest(BaseModel):
+    """Richiesta di solo retrieval (usata dal benchmark), con un eventuale piano già calcolato."""
+
     message: str = Field(..., min_length=MIN_MESSAGE_LENGTH, max_length=MAX_MESSAGE_LENGTH)
     use_planner: bool = True
     retrieval: RetrievalOptions = Field(default_factory=RetrievalOptions)
-    subquestions: list[str] | None = Field(default=None, description="Piano gia' calcolato: salta il planner")
+    subquestions: list[str] | None = Field(default=None, description="Piano già calcolato: salta il planner")
 
 
 @app.get("/health")
-def health_check():
-    """
-    Verifica lo stato del servizio esperto e dell'indicizzazione.
-    
+def health_check() -> dict:
+    """Verifica lo stato del servizio e dell'indice.
+
     Returns:
-        Dict con stato del servizio e dell'indicizzazione.
+        Lo stato (`not_indexed`, `indexing` oppure `ok`), un messaggio e, se l'indice è pronto, il
+        numero di punti in Qdrant.
+
+    Raises:
+        HTTPException: Con stato 503 se la verifica fallisce, ad esempio se Qdrant non risponde.
     """
     try:
-        # Verifica se il file flag esiste (indicizzazione completata)
+        # Il file flag esiste solo a indicizzazione completata.
         if not INDEX_COMPLETE_FILE.exists():
             return {
                 "status": "not_indexed",
-                "message": "Indice non presente: caricare uno ZIP tramite il servizio di ingestion"
+                "message": "Indice non presente: caricare uno ZIP tramite il servizio di ingestion",
             }
-        
-        # Verifica anche che Qdrant sia accessibile e abbia dati
+
+        # Qdrant deve essere raggiungibile e contenere dei punti.
         client = get_sync_client()
         collection_info = client.get_collection(QDRANT_COLLECTION)
-        
+
         if collection_info.points_count == 0:
             return {
                 "status": "indexing",
-                "message": "Indicizzazione in corso - nessun punto in Qdrant"
+                "message": "Indicizzazione in corso - nessun punto in Qdrant",
             }
-        
+
         return {
             "status": "ok",
             "message": "Indicizzazione completata",
-            "points_count": collection_info.points_count
+            "points_count": collection_info.points_count,
         }
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Errore health check: {str(e)}")
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Errore health check: {error}") from error
 
 
 @app.post("/retrieve")
 async def retrieve(request: RetrieveRequest) -> dict:
-    """Planner + retrieval senza generazione: sotto-domande, fonti e candidati esclusi dal contesto."""
+    """Esegue planner e retrieval senza generare la risposta.
+
+    Args:
+        request: Domanda, interruttori di retrieval ed eventuale piano già calcolato.
+
+    Returns:
+        Le sotto-domande usate, le fonti del contesto e i candidati rimasti fuori dal contesto.
+
+    Raises:
+        HTTPException: Con stato 400 se il messaggio contiene solo spazi.
+    """
     message = request.message.strip()
     if not message:
-        raise HTTPException(status_code=400, detail="Il messaggio non puo' essere vuoto.")
+        raise HTTPException(status_code=400, detail="Il messaggio non può essere vuoto.")
     subquestions, sources, dropped = await retrieve_only(
         message, request.use_planner, request.retrieval, request.subquestions
     )
@@ -90,25 +113,31 @@ async def retrieve(request: RetrieveRequest) -> dict:
 
 @app.post("/ask")
 async def ask_expert(request: ChatRequest) -> StreamingResponse:
-    """
-    Endpoint per porre una domanda all'esperto e ricevere la risposta in streaming.
+    """Pone la domanda all'esperto e ne trasmette la risposta in streaming.
 
     Args:
-        request (ChatRequest): La richiesta contenente la domanda dell'utente.
+        request: Domanda dell'utente con gli interruttori della pipeline.
 
     Returns:
-        StreamingResponse: La risposta dell'esperto in streaming, chunk per chunk.
+        Lo stream di testo con un evento JSON per riga: fonti, ragionamento e parti della risposta.
+
+    Raises:
+        HTTPException: Con stato 400 se il messaggio contiene solo spazi.
     """
     # Il controllo pydantic sui limiti di lunghezza avviene prima dello strip:
     # qui resta solo il caso di un messaggio di soli spazi.
     message = request.message.strip()
     if not message:
-        raise HTTPException(status_code=400, detail="Il messaggio non puo' essere vuoto.")
+        raise HTTPException(status_code=400, detail="Il messaggio non può essere vuoto.")
 
-    logger.info(f"Query received: {len(message)} chars")
-    
-    async def timeout_wrapper():
-        """Wrapper with an overall deadline to prevent indefinite streaming."""
+    logger.info("Domanda ricevuta: %d caratteri.", len(message))
+
+    async def timeout_wrapper() -> AsyncIterator[str]:
+        """Inoltra lo stream dell'esperto entro una scadenza complessiva.
+
+        Yields:
+            Gli eventi prodotti dall'esperto; alla scadenza o in caso di errore, una riga `[ERROR] ...`.
+        """
         stream = stream_expert_response(
             message,
             use_planner=request.use_planner,
@@ -123,12 +152,12 @@ async def ask_expert(request: ChatRequest) -> StreamingResponse:
         except StopAsyncIteration:
             return
         except asyncio.TimeoutError:
-            logger.error(f"Timeout during streaming (limit {LLM_INFERENCE_TIMEOUT}s)")
+            logger.error("Timeout durante lo streaming (limite %ss).", LLM_INFERENCE_TIMEOUT)
             yield "[ERROR] La risposta ha superato il timeout massimo."
-        except Exception as e:
-            logger.error(f"Error during streaming: {type(e).__name__}: {str(e)}")
-            yield f"[ERROR] Si è verificato un errore: {type(e).__name__}"
-    
+        except Exception as error:
+            logger.error("Errore durante lo streaming: %s: %s", type(error).__name__, error)
+            yield f"[ERROR] Si è verificato un errore: {type(error).__name__}"
+
     return StreamingResponse(
         timeout_wrapper(),
         media_type="text/plain; charset=utf-8",

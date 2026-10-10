@@ -1,1 +1,1 @@
-"""Ingestion service: upload ZIP della codebase e avvio indicizzazione."""
+"""Servizio di ingestion: upload dello ZIP della codebase e avvio dell'indicizzazione."""

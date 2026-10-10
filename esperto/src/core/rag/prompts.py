@@ -1,14 +1,11 @@
-"""Grounding prompt definitions for codebase answers."""
+"""Prompt con cui il modello risponde alle domande sulla codebase."""
 
-from langchain_core.prompts import (
-    ChatPromptTemplate,
-    HumanMessagePromptTemplate,
-)
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
 
 # Singolo messaggio utente: alcuni modelli Ollama gestiscono male i SystemMessage separati e
 # restituiscono risposte vuote. La mappa, uguale per ogni richiesta, apre il prompt (Ollama ne
-# riusa la cache); la domanda precede il contesto, cosi' il modello lo legge sapendo cosa cercare,
-# ed e' ripetuta in fondo. Poche regole: un modello piccolo ne segue bene poche.
+# riusa la cache); la domanda precede il contesto, così il modello lo legge sapendo cosa cercare,
+# ed è ripetuta in fondo. Poche regole: un modello piccolo ne segue bene poche.
 INSTRUCTION = (
     "{repo_map}"
     "DOMANDA A CUI RISPONDERE: {question}\n\n"
@@ -28,9 +25,9 @@ INSTRUCTION = (
 
 
 def build_prompt() -> ChatPromptTemplate:
-    """Build the prompt template for the generation chain (single user message)."""
-    return ChatPromptTemplate.from_messages(
-        [
-            HumanMessagePromptTemplate.from_template(INSTRUCTION),
-        ]
-    )
+    """Costruisce il template del prompt di generazione, formato da un solo messaggio utente.
+
+    Returns:
+        Il template con i segnaposto `repo_map`, `question` e `context`.
+    """
+    return ChatPromptTemplate.from_messages([HumanMessagePromptTemplate.from_template(INSTRUCTION)])

@@ -2,6 +2,11 @@
     const notices = document.getElementById('ui-notices');
     const dialog = document.getElementById('confirm-dialog');
 
+    /**
+     * Mostra per cinque secondi una notifica nell'area degli avvisi.
+     * @param {string} message Testo della notifica.
+     * @param {string} [type='info'] Tipo di notifica (`info`, `success`, `error`), usato come classe CSS.
+     */
     function notify(message, type = 'info') {
         if (!notices || !message) return;
         const notice = document.createElement('div');
@@ -12,6 +17,12 @@
         window.setTimeout(() => notice.remove(), 5000);
     }
 
+    /**
+     * Attiva o disattiva lo stato di attesa di un pulsante.
+     * @param {HTMLButtonElement} button Pulsante da aggiornare.
+     * @param {boolean} busy True per disabilitarlo, false per ripristinarlo.
+     * @param {string} [label] Etichetta da mostrare; se manca, al ripristino torna quella precedente.
+     */
     function setBusy(button, busy, label) {
         if (!button) return;
         if (busy) {
@@ -26,6 +37,14 @@
         button.textContent = label || button.dataset.label || button.textContent;
     }
 
+    /**
+     * Chiede conferma all'utente con la finestra di dialogo della pagina, o con `window.confirm` dove manca.
+     * @param {object} [options] Testi della finestra.
+     * @param {string} [options.title='Conferma azione'] Titolo.
+     * @param {string} [options.message=''] Messaggio.
+     * @param {string} [options.confirmLabel='Conferma'] Etichetta del pulsante di conferma.
+     * @returns {Promise<boolean>} True se l'utente conferma.
+     */
     function confirmAction({ title = 'Conferma azione', message = '', confirmLabel = 'Conferma' } = {}) {
         if (!dialog || typeof dialog.showModal !== 'function') {
             return Promise.resolve(window.confirm(message));

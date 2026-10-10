@@ -234,3 +234,7 @@ esperto_state/
 
 # Benchmark output
 benchmark_results/
+
+# Test (restano in locale, fuori dal repository)
+esperto/tests/
+benchmark/tests/

@@ -10,7 +10,6 @@ import platform
 import random
 import time
 from pathlib import Path
-from typing import List, Optional
 
 import httpx
 from pydantic import BaseModel
@@ -43,33 +42,52 @@ CONFIGS: dict[str, tuple[bool, dict]] = {
     "no_symbol_lookup": (True, {"use_symbol_lookup": False}),
     "no_repo_map": (True, {"use_repo_map": False}),  # la mappa guida il planner e apre il prompt
     "naive": (False, _NAIVE),
-    # Stessa ricerca di `naive`, ma con K al massimo: e' il budget di contesto a tagliare, come in
-    # `full`. Dice se gli stadi aggiunti valgono piu' di "altro contesto preso in ordine denso".
+    # Stessa ricerca di `naive`, ma con K al massimo: è il budget di contesto a tagliare, come in
+    # `full`. Dice se gli stadi aggiunti valgono più di "altro contesto preso in ordine denso".
     "naive_budget": (False, {**_NAIVE, "k": 50}),
 }
-CLOSED_BOOK = "closed_book"  # LLM senza contesto: misura quanto il modello conosce gia' il repo
+CLOSED_BOOK = "closed_book"  # LLM senza contesto: misura quanto il modello conosce già il repo
 
 
 def resolve_config(name: str) -> tuple[bool, dict]:
-    """(use_planner, opzioni) di una configurazione; `nome@k=N` ne fissa il K (es. `full@k=20`)."""
+    """Risolve il nome di una configurazione.
+
+    Il suffisso `@k=N` ne fissa il K (es. `full@k=20`).
+
+    Args:
+        name: Nome della configurazione, con il suffisso facoltativo.
+
+    Returns:
+        L'uso del planner e le opzioni di retrieval della configurazione.
+    """
     base, _, k = name.partition("@k=")
     use_planner, options = CONFIGS[base]
     return use_planner, {**options, "k": int(k)} if k else options
 
 
 class RunSpec(BaseModel):
+    """Specifica di un run: dataset, stadi, configurazioni e campione di domande."""
+
     dataset: str
-    stages: List[str] = ["retrieval", "generation"]
-    retrieval_configs: List[str] = list(CONFIGS)
-    # La generazione e' lo stadio lento: di default solo sistema completo e le due baseline.
-    generation_configs: List[str] = ["full", "naive", "naive_budget", CLOSED_BOOK]
-    per_category: Optional[int] = 4  # domande estratte per categoria; None = tutto il gold set
+    stages: list[str] = ["retrieval", "generation"]
+    retrieval_configs: list[str] = list(CONFIGS)
+    # La generazione è lo stadio lento: di default solo sistema completo e le due baseline.
+    generation_configs: list[str] = ["full", "naive", "naive_budget", CLOSED_BOOK]
+    per_category: int | None = 4  # domande estratte per categoria; None = tutto il gold set
     seed: int = 0
     skip_index: bool = False
     planner: bool = True  # False: planner spento in tutte le configurazioni
 
 
 def check_spec(spec: RunSpec) -> None:
+    """Verifica che configurazioni e stadi di una specifica esistano.
+
+    Args:
+        spec: Specifica da verificare.
+
+    Raises:
+        ValueError: Se una configurazione o uno stadio sono sconosciuti.
+    """
     for name in [*spec.retrieval_configs, *(n for n in spec.generation_configs if n != CLOSED_BOOK)]:
         try:
             resolve_config(name)
@@ -79,8 +97,17 @@ def check_spec(spec: RunSpec) -> None:
         raise ValueError(f"Stadi sconosciuti: {spec.stages}")
 
 
-def sample_questions(questions: list[Question], per_category: Optional[int], seed: int) -> list[Question]:
-    """Campione stratificato e riproducibile: `per_category` domande per categoria, nell'ordine del dataset."""
+def sample_questions(questions: list[Question], per_category: int | None, seed: int) -> list[Question]:
+    """Estrae un campione stratificato e riproducibile di domande.
+
+    Args:
+        questions: Domande del dataset.
+        per_category: Domande da estrarre per categoria; None per tenerle tutte.
+        seed: Seme dell'estrazione.
+
+    Returns:
+        Le domande estratte, nell'ordine del dataset.
+    """
     if per_category is None:
         return questions
     chosen: set[str] = set()
@@ -91,7 +118,14 @@ def sample_questions(questions: list[Question], per_category: Optional[int], see
 
 
 def _done(path: Path) -> set[tuple[str, str]]:
-    """Coppie (config, domanda) gia' completate senza errori: una ripresa non le rifa'."""
+    """Legge le coppie già completate senza errori: una ripresa non le rifà.
+
+    Args:
+        path: File JSON Lines dello stadio.
+
+    Returns:
+        Le coppie (configurazione, ID della domanda) completate.
+    """
     if not path.exists():
         return set()
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
@@ -99,34 +133,77 @@ def _done(path: Path) -> set[tuple[str, str]]:
 
 
 def _compact(sources: list[dict]) -> list[dict]:
-    keys = ("filename", "symbol_name", "chunk_type", "start_line", "end_line", "chunk_id", "score", "origin", "graph_relation")
+    """Riduce le fonti ai soli metadati, senza il testo dei chunk.
+
+    Args:
+        sources: Fonti restituite da esperto.
+
+    Returns:
+        Le fonti con i soli campi salvati nei risultati.
+    """
+    keys = (
+        "filename", "symbol_name", "chunk_type", "start_line", "end_line", "chunk_id", "score", "origin",
+        "graph_relation",
+    )
     return [{key: source.get(key) for key in keys} for source in sources]
 
 
 def _append(path: Path, row: dict) -> None:
+    """Aggiunge una riga a un file JSON Lines.
+
+    Args:
+        path: File di destinazione.
+        row: Oggetto da scrivere.
+    """
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 class _Status:
-    """status.json del run, riscritto a ogni aggiornamento."""
+    """File `status.json` del run, riscritto a ogni aggiornamento."""
 
     def __init__(self, run_dir: Path, run_id: str):
+        """Crea lo stato iniziale del run e lo scrive su file.
+
+        Args:
+            run_dir: Cartella del run.
+            run_id: ID del run.
+        """
         self._path = run_dir / "status.json"
         self._data = {"run_id": run_id, "status": "running", "stage": "setup", "done": 0, "total": 0, "error": None}
         self.update()
 
     def update(self, **fields) -> None:
+        """Aggiorna lo stato e lo riscrive su file.
+
+        Args:
+            **fields: Campi da modificare.
+        """
         self._data.update(fields)
         self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
 
     def advance(self) -> None:
+        """Segna come completata un'altra domanda."""
         self.update(done=self._data["done"] + 1)
 
 
 def _manifest(
-    run_id: str, spec: RunSpec, dataset: Dataset, commit: str, job: Optional[dict], health: dict, sampled: int
+    run_id: str, spec: RunSpec, dataset: Dataset, commit: str, job: dict | None, health: dict, sampled: int
 ) -> dict:
+    """Compone il manifest del run: tutto ciò che serve a riprodurlo.
+
+    Args:
+        run_id: ID del run.
+        spec: Specifica del run.
+        dataset: Dataset usato.
+        commit: Commit del checkout del repository.
+        job: Job di indicizzazione; None se l'indicizzazione è stata saltata.
+        health: Stato di esperto all'avvio.
+        sampled: Numero di domande del campione.
+
+    Returns:
+        Il manifest con specifica, dataset, parametri RAG, indicizzazione e versione di Python.
+    """
     questions_bytes = (DATASETS_DIR / dataset.name / "questions.yaml").read_bytes()
     categories: dict[str, int] = {}
     for question in dataset.questions:
@@ -151,10 +228,21 @@ def _manifest(
     }
 
 
-def _retrieval_stage(client: EspertoClient, spec: RunSpec, questions: list[Question], run_dir: Path, status: _Status) -> None:
+def _retrieval_stage(
+    client: EspertoClient, spec: RunSpec, questions: list[Question], run_dir: Path, status: _Status
+) -> None:
+    """Esegue lo stadio di retrieval e ne scrive le righe in `retrieval.jsonl`.
+
+    Args:
+        client: Client di esperto.
+        spec: Specifica del run.
+        questions: Domande del campione.
+        run_dir: Cartella del run.
+        status: Stato del run, aggiornato a ogni domanda.
+    """
     status.update(stage="retrieval", done=0, total=len(spec.retrieval_configs) * len(questions))
     done = _done(run_dir / "retrieval.jsonl")
-    # Il piano del planner e' calcolato una volta per domanda e riusato dalle ablation che lo
+    # Il piano del planner è calcolato una volta per domanda e riusato dalle ablation che lo
     # condividono: stessa scomposizione per tutte, e una sola chiamata al planner.
     plans: dict[str, list[str]] = {}
     for name in spec.retrieval_configs:
@@ -179,25 +267,27 @@ def _retrieval_stage(client: EspertoClient, spec: RunSpec, questions: list[Quest
                 if question.relevant:
                     relevant = [item.model_dump() for item in question.relevant]
                     row["metrics"] = {**retrieval_metrics(sources, relevant), "seconds": result["seconds"]}
-                    # Dove finisce ogni simbolo atteso: e' la base della diagnosi del report.
+                    # Dove finisce ogni simbolo atteso: è la base della diagnosi del report.
                     row["gold"] = gold_status(sources, dropped, relevant)
             except (httpx.HTTPError, KeyError, ValueError) as error:
                 row["error"] = f"{type(error).__name__}: {error}"
             _append(run_dir / "retrieval.jsonl", row)
 
 
-def judging_key(run_id: str, config: str, question_id: str) -> str:
-    """Chiave opaca di una risposta: chi giudica non vede da quale configurazione viene."""
-    return hashlib.sha1(f"{run_id}:{config}:{question_id}".encode("utf-8")).hexdigest()[:12]
-
-
 def _write_judging_file(run_dir: Path, run_id: str, questions: list[Question]) -> None:
-    """`to_judge.jsonl`: le risposte da giudicare, senza configurazione e in ordine mescolato."""
+    """Scrive `to_judge.jsonl`: le risposte da giudicare, senza configurazione e in ordine mescolato.
+
+    Args:
+        run_dir: Cartella del run.
+        run_id: ID del run.
+        questions: Domande del campione.
+    """
     by_id = {question.id: question for question in questions}
-    rows = [json.loads(line) for line in (run_dir / "generation.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    lines = (run_dir / "generation.jsonl").read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(line) for line in lines if line]
     items = {
         (row["config"], row["id"]): {
-            "key": judging_key(run_id, row["config"], row["id"]),
+            "key": report.judging_key(run_id, row["config"], row["id"]),
             "question": by_id[row["id"]].question,
             "key_facts": by_id[row["id"]].key_facts,
             "answer": row["answer"],
@@ -212,7 +302,18 @@ def _write_judging_file(run_dir: Path, run_id: str, questions: list[Question]) -
 
 
 def _generate(client: EspertoClient, spec: RunSpec, dataset: Dataset, question: Question, name: str) -> dict:
-    """Risposta + contesto per una configurazione (closed_book: nessun contesto)."""
+    """Genera la risposta a una domanda con una configurazione.
+
+    Args:
+        client: Client di esperto.
+        spec: Specifica del run.
+        dataset: Dataset usato.
+        question: Domanda da porre.
+        name: Nome della configurazione; `closed_book` interroga il modello senza contesto.
+
+    Returns:
+        La risposta con le sue fonti e, per le configurazioni di esperto, tempi ed eventuale errore.
+    """
     if name == CLOSED_BOOK:
         prompt = f"Rispondi in italiano a questa domanda sul progetto Python '{dataset.name}':\n{question.question}"
         return {"answer": ollama.chat(prompt, model=LLM_MODEL), "sources": []}
@@ -223,6 +324,19 @@ def _generate(client: EspertoClient, spec: RunSpec, dataset: Dataset, question: 
 def _generation_stage(
     client: EspertoClient, spec: RunSpec, dataset: Dataset, questions: list[Question], run_dir: Path, status: _Status
 ) -> None:
+    """Esegue lo stadio di generazione e ne scrive le righe in `generation.jsonl`.
+
+    Args:
+        client: Client di esperto.
+        spec: Specifica del run.
+        dataset: Dataset usato.
+        questions: Domande del campione.
+        run_dir: Cartella del run.
+        status: Stato del run, aggiornato a ogni domanda.
+
+    Raises:
+        RuntimeError: Se esperto non risponde alla domanda di riscaldamento.
+    """
     status.update(stage="generation", done=0, total=len(spec.generation_configs) * len(questions))
     done = _done(run_dir / "generation.jsonl")
     if set(spec.generation_configs) - {CLOSED_BOOK}:
@@ -239,7 +353,7 @@ def _generation_stage(
             try:
                 result = _generate(client, spec, dataset, question, name)
                 answer, sources = result["answer"], result["sources"]
-                # La mappa del repository e' nel prompt: fa parte di cio' che il modello ha visto.
+                # La mappa del repository è nel prompt: fa parte di ciò che il modello ha visto.
                 context = "\n\n---\n\n".join(
                     filter(None, [result.get("repo_map"), *(source["content"] for source in sources)])
                 )
@@ -249,22 +363,32 @@ def _generation_stage(
                 if context:  # per capire, davanti a un fatto sbagliato, se l'informazione c'era
                     contexts = run_dir / "contexts"
                     contexts.mkdir(exist_ok=True)
-                    (contexts / f"{judging_key(run_dir.name, name, question.id)}.txt").write_text(context, encoding="utf-8")
+                    context_file = contexts / f"{report.judging_key(run_dir.name, name, question.id)}.txt"
+                    context_file.write_text(context, encoding="utf-8")
                 # I tempi vengono dalla stessa richiesta: nessuno stadio di latenza separato.
                 timings = {k: result[k] for k in ("retrieval_s", "ttft_s", "total_s") if result.get(k) is not None}
                 row["metrics"] = {**timings, "answer_error": 0.0, "answer_chars": float(len(answer))}
                 if question.relevant and name != CLOSED_BOOK:
                     # Serve a separare gli errori del retrieval da quelli del modello.
                     relevant = [item.model_dump() for item in question.relevant]
-                    row["metrics"]["symbol_context_recall"] = retrieval_metrics(sources, relevant)["symbol_context_recall"]
+                    recall = retrieval_metrics(sources, relevant)["symbol_context_recall"]
+                    row["metrics"]["symbol_context_recall"] = recall
             except (httpx.HTTPError, KeyError, ValueError) as error:
                 row["error"] = f"{type(error).__name__}: {error}"
                 row["metrics"] = {"answer_error": 1.0}
             _append(run_dir / "generation.jsonl", row)
 
 
-def execute_run(run_id: str, spec: RunSpec, client: Optional[EspertoClient] = None) -> None:
-    """Esegue il run e scrive tutti gli artefatti in RESULTS_DIR/<run_id>. Errori in status.json."""
+def execute_run(run_id: str, spec: RunSpec, client: EspertoClient | None = None) -> None:
+    """Esegue il run e ne scrive tutti i file in RESULTS_DIR/<run_id>.
+
+    Gli errori non si propagano: finiscono in `status.json`.
+
+    Args:
+        run_id: ID del run.
+        spec: Specifica del run.
+        client: Client di esperto; se manca ne viene creato uno.
+    """
     run_dir = RESULTS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     status = _Status(run_dir, run_id)
@@ -284,7 +408,7 @@ def execute_run(run_id: str, spec: RunSpec, client: Optional[EspertoClient] = No
             status.update(stage="indexing")
             job = client.index_zip(build_zip(repo_dir, repo_files), zip_name)
         elif client.indexed_filename() != zip_name:
-            raise ValueError(f"L'indice attivo non e' quello di {zip_name}: rilanciare senza skip_index")
+            raise ValueError(f"L'indice attivo non è quello di {zip_name}: rilanciare senza skip_index")
         health = client.health()
         if health.get("status") != "ok":
             raise RuntimeError(f"Esperto non pronto: {health}")

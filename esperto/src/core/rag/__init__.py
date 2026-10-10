@@ -1,1 +1,1 @@
-"""Query expansion, retrieval, prompts, and generation for the Esperto RAG."""
+"""Planner, retrieval, prompt e generazione della risposta dell'esperto."""

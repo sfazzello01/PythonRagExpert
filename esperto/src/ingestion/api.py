@@ -1,4 +1,4 @@
-"""API del servizio di ingestion: upload ZIP e stato indicizzazione."""
+"""API del servizio di ingestion: upload dello ZIP e stato dell'indicizzazione."""
 
 from __future__ import annotations
 
@@ -17,28 +17,37 @@ app = FastAPI(title="Esperto Indexer")
 
 @app.get("/health")
 def health_check() -> dict[str, str]:
-    """Health check semplice del servizio di ingestion."""
+    """Verifica che il servizio di ingestion sia attivo.
+
+    Returns:
+        Lo stato `ok`.
+    """
     return {"status": "ok"}
 
 
 @app.get("/status")
 def get_status() -> dict:
-    """
-    Restituisce lo stato del job di indicizzazione corrente.
+    """Restituisce lo stato del job di indicizzazione corrente.
 
     Returns:
-        Dict con status (not_indexed/queued/indexing/ready/error) e dettagli job.
+        Lo stato (`not_indexed`, `queued`, `indexing`, `ready` o `error`) e i dettagli del job.
     """
     return current_job_status()
 
 
 @app.post("/upload", status_code=202)
 async def upload_zip(file: UploadFile = File(...)) -> dict:
-    """
-    Riceve uno ZIP della codebase, lo valida e avvia l'indicizzazione in background.
+    """Riceve lo ZIP della codebase, lo valida e avvia l'indicizzazione in background.
+
+    Args:
+        file: Archivio ZIP caricato.
 
     Returns:
-        Dettagli del job accettato (status queued).
+        Lo stato e i dettagli del job accettato (`queued`).
+
+    Raises:
+        HTTPException: Con stato 400 se l'archivio non è valido, 409 se un'indicizzazione è già in
+            corso.
     """
     filename = file.filename or "upload.zip"
     # Un byte oltre il limite basta a validate_zip per rifiutare senza caricare tutto in RAM.
@@ -46,18 +55,13 @@ async def upload_zip(file: UploadFile = File(...)) -> dict:
 
     try:
         names = validate_zip(content, filename)
-    except ZipValidationError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ZipValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     try:
         job = start_index_job(content, names, filename)
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
-    logger.info(
-        "Upload accettato: %s (%d file, max %d MB)",
-        filename,
-        len(names),
-        MAX_UPLOAD_MB,
-    )
+    logger.info("Upload accettato: %s (%d file, max %d MB)", filename, len(names), MAX_UPLOAD_MB)
     return {"status": job["status"], "job": job}

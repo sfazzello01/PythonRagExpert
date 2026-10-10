@@ -1,4 +1,4 @@
-"""Runtime access to the static symbol graph created during indexing."""
+"""Accesso a runtime al symbol graph statico creato dall'indicizzazione."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import json
 import logging
 import re
 from collections import defaultdict, deque
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from config import (
     SYMBOL_GRAPH_FILE,
@@ -20,15 +20,20 @@ from config import (
 
 logger = logging.getLogger("EspertoSymbolGraph")
 
-# Oltre questo numero di definizioni un nome (es. `run`, `__init__`) e' ambiguo e non viene usato.
+# Oltre questo numero di definizioni un nome (es. `run`, `__init__`) è ambiguo e non viene usato.
 MAX_NAME_MATCHES = 3
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 class SymbolGraph:
-    """Resolve related callers and callees to their enclosing indexed chunks."""
+    """Trova i chunk collegati nel grafo (chiamanti, chiamati, basi) e quelli dei simboli nominati."""
 
     def __init__(self, graph_path: Path = SYMBOL_GRAPH_FILE):
+        """Crea l'accesso al grafo; il file viene letto alla prima interrogazione.
+
+        Args:
+            graph_path: File JSON del symbol graph.
+        """
         self._graph_path = graph_path
         self._modified_at: int | None = None
         self._chunk_to_symbols: dict[str, set[str]] = {}
@@ -38,7 +43,17 @@ class SymbolGraph:
         self._chunks_by_name: dict[str, set[str]] = {}
 
     def chunks_named(self, text: str) -> list[str]:
-        """Return the chunks defining the symbols that the text mentions by name."""
+        """Trova i chunk che definiscono i simboli nominati in un testo.
+
+        Contano solo le parole con la forma di un identificatore (con maiuscole, `_` o punti); un nome
+        definito in più di MAX_NAME_MATCHES chunk è ambiguo e viene ignorato.
+
+        Args:
+            text: Domanda in cui cercare i nomi.
+
+        Returns:
+            Gli ID dei chunk, senza duplicati, nell'ordine in cui i nomi compaiono nel testo.
+        """
         self._reload_if_needed()
         chunk_ids: dict[str, None] = {}
         for token in _IDENTIFIER.findall(text):
@@ -53,18 +68,23 @@ class SymbolGraph:
         return list(chunk_ids)
 
     def related_chunks(self, chunk_ids: set[str], limit: int, top_chunk_ids: Sequence[str] = ()) -> dict[str, str]:
-        """Return graph-related chunks ranked by Personalized PageRank.
+        """Trova i chunk collegati ai semi nel grafo, ordinati con Personalized PageRank.
 
-        I candidati sono raccolti con BFS bidirezionale entro la profondità
-        configurata; il ranking usa PPR sulla sola adiacenza diretta
-        (calls/inherits, source -> target). I chunk seed sono esclusi.
-        I vicini a un passo di `top_chunk_ids` precedono tutti gli altri.
+        I candidati sono raccolti con una BFS bidirezionale entro la profondità configurata; l'ordine usa il
+        PageRank sulla sola adiacenza diretta (`calls`/`inherits`, da sorgente a destinazione). I vicini a
+        un passo di `top_chunk_ids` precedono tutti gli altri.
+
+        Args:
+            chunk_ids: Chunk seme, esclusi dal risultato.
+            limit: Numero massimo di chunk.
+            top_chunk_ids: Primi risultati, i cui vicini diretti hanno la precedenza.
+
+        Returns:
+            Per ogni chunk collegato, in ordine di priorità, il percorso di relazioni che lo lega ai semi.
         """
         self._reload_if_needed()
         seed_symbols = {
-            symbol_id
-            for chunk_id in chunk_ids
-            for symbol_id in self._chunk_to_symbols.get(chunk_id, set())
+            symbol_id for chunk_id in chunk_ids for symbol_id in self._chunk_to_symbols.get(chunk_id, set())
         }
         if not seed_symbols:
             return {}
@@ -95,8 +115,8 @@ class SymbolGraph:
                     tier = 0 if neighbor_id.rpartition("::")[0] == scope else 1
                     priority[neighbor_chunk] = min(tier, priority.get(neighbor_chunk, tier))
 
-        # A parita' di score (es. i chiamanti, che il PPR diretto non raggiunge)
-        # vince il percorso piu' corto dai seed.
+        # A parità di score (es. i chiamanti, che il PPR diretto non raggiunge)
+        # vince il percorso più corto dai seed.
         ordered = sorted(
             best_by_chunk,
             key=lambda chunk_id: (
@@ -109,7 +129,14 @@ class SymbolGraph:
         return {chunk_id: best_by_chunk[chunk_id][1] for chunk_id in ordered[:limit]}
 
     def _bfs_relation_paths(self, seed_symbols: set[str]) -> dict[str, str]:
-        """Collect candidate symbols within the configured depth and their shortest paths."""
+        """Raccoglie i simboli raggiungibili dai semi entro la profondità configurata.
+
+        Args:
+            seed_symbols: Simboli di partenza.
+
+        Returns:
+            Per ogni simbolo raggiunto, il percorso di relazioni più breve che lo lega a un seme.
+        """
         paths: dict[str, str] = {}
         queue = deque((symbol_id, 0, "") for symbol_id in sorted(seed_symbols))
         visited = set(seed_symbols)
@@ -121,36 +148,33 @@ class SymbolGraph:
                 if neighbor_id in visited:
                     continue
                 visited.add(neighbor_id)
-                next_path = (
-                    f"{relation_path}->{relation}" if relation_path else relation
-                )
+                next_path = f"{relation_path}->{relation}" if relation_path else relation
                 paths[neighbor_id] = next_path
                 if depth + 1 < SYMBOL_GRAPH_MAX_DEPTH:
                     queue.append((neighbor_id, depth + 1, next_path))
         return paths
 
-    def _personalized_pagerank(
-        self, seed_symbols: set[str], candidates: set[str]
-    ) -> dict[str, float]:
-        """Rank symbols with Personalized PageRank over directed edges only."""
+    def _personalized_pagerank(self, seed_symbols: set[str], candidates: set[str]) -> dict[str, float]:
+        """Ordina i simboli con Personalized PageRank, seguendo i soli archi orientati.
+
+        Args:
+            seed_symbols: Simboli a cui torna il teletrasporto.
+            candidates: Simboli raggiunti dalla BFS.
+
+        Returns:
+            Lo score di ogni simbolo, semi compresi; la somma degli score è 1.
+        """
         nodes = sorted(seed_symbols | candidates)
         node_set = set(nodes)
         out_edges = {
-            node_id: [
-                target
-                for target in self._out_edges.get(node_id, [])
-                if target in node_set
-            ]
+            node_id: [target for target in self._out_edges.get(node_id, []) if target in node_set]
             for node_id in nodes
         }
         personalization = 1.0 / len(seed_symbols)
-        ranks = {
-            node_id: personalization if node_id in seed_symbols else 0.0
-            for node_id in nodes
-        }
+        ranks = {node_id: personalization if node_id in seed_symbols else 0.0 for node_id in nodes}
         damping = SYMBOL_GRAPH_PAGERANK_DAMPING
         for _ in range(SYMBOL_GRAPH_PAGERANK_ITERATIONS):
-            next_ranks = {node_id: 0.0 for node_id in nodes}
+            next_ranks = dict.fromkeys(nodes, 0.0)
             dangling_mass = 0.0
             for node_id in nodes:
                 targets = out_edges[node_id]
@@ -171,6 +195,7 @@ class SymbolGraph:
         return ranks
 
     def _reload_if_needed(self) -> None:
+        """Ricarica il grafo se il file è cambiato dall'ultima lettura; lo svuota se manca o non è valido."""
         try:
             modified_at = self._graph_path.stat().st_mtime_ns
         except OSError:
@@ -181,11 +206,11 @@ class SymbolGraph:
         try:
             graph = json.loads(self._graph_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            logger.warning("Cannot load symbol graph: %s", error)
+            logger.warning("Impossibile caricare il symbol graph: %s", error)
             self._reset()
             return
         if graph.get("version") != SYMBOL_GRAPH_VERSION:
-            logger.warning("Ignoring unsupported symbol graph version.")
+            logger.warning("Versione del symbol graph non supportata: grafo ignorato.")
             self._reset()
             return
 
@@ -216,15 +241,24 @@ class SymbolGraph:
         self._modified_at = modified_at
 
     def _chunk_for_symbol(self, symbol_id: str) -> str | None:
+        """Risale da un simbolo al chunk che lo contiene.
+
+        Args:
+            symbol_id: ID del simbolo.
+
+        Returns:
+            L'ID del chunk, oppure None se nessun simbolo che lo contiene ha un chunk.
+        """
         current = symbol_id
         while current:
             node = self._nodes.get(current)
             if node and node.get("chunk_id"):
                 return node["chunk_id"]
-            current = current.rsplit("::", 1)[0] if "::" in current else ""
+            current = current.rpartition("::")[0]
         return None
 
     def _reset(self) -> None:
+        """Svuota il grafo in memoria."""
         self._modified_at = None
         self._chunk_to_symbols = {}
         self._chunks_by_name = {}

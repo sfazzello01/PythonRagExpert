@@ -1,26 +1,34 @@
-"""LangChain composition and streaming entry point for the Esperto RAG."""
+"""Composizione LangChain della pipeline RAG e punto di ingresso dello streaming."""
 
 from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 
+from langchain_core.prompt_values import PromptValue
 from langchain_ollama import ChatOllama  # type: ignore
 
 from config import LLM_CONTEXT_TOKENS, LLM_MODEL, OLLAMA_URL, REPO_MAP_FILE, TEMPERATURE
 
-from .prompts import build_prompt
-from .planner import plan_subquestions
-from .retrieval import Retriever
 from ..shared.options import RetrievalOptions
 from ..shared.text import without_imports
+from .planner import plan_subquestions
+from .prompts import build_prompt
+from .retrieval import Retriever
 
 _retriever: Retriever | None = None
 
 
 def _get_retriever() -> Retriever:
-    """Lazy singleton: evita side-effect (client Qdrant) a import-time."""
+    """Restituisce il retriever condiviso, creato alla prima richiesta.
+
+    La creazione pigra evita di aprire il client Qdrant all'import del modulo.
+
+    Returns:
+        L'unica istanza di `Retriever` del processo.
+    """
     global _retriever
     if _retriever is None:
         _retriever = Retriever()
@@ -28,7 +36,14 @@ def _get_retriever() -> Retriever:
 
 
 def _create_response_llm(use_reasoning: bool) -> ChatOllama:
-    """Create a response model configured for the current user request."""
+    """Crea il modello che genera la risposta, configurato per la richiesta corrente.
+
+    Args:
+        use_reasoning: True per far produrre al modello anche il ragionamento.
+
+    Returns:
+        Il client del modello Ollama.
+    """
     return ChatOllama(
         model=LLM_MODEL,
         base_url=OLLAMA_URL,
@@ -48,15 +63,25 @@ _planner_llm = ChatOllama(
 
 
 def _repo_map() -> str:
-    """Repository overview written by the last indexing run (empty if not available)."""
+    """Legge la mappa del repository scritta dall'ultima indicizzazione.
+
+    Returns:
+        Il testo della mappa, oppure una stringa vuota se non è disponibile.
+    """
     try:
         return REPO_MAP_FILE.read_text(encoding="utf-8")
     except OSError:
         return ""
 
 
-def _save_last_prompt(prompt_value) -> None:
-    """Persist the rendered prompt for local inspection after a UI request."""
+def _save_last_prompt(prompt_value: PromptValue) -> None:
+    """Salva il prompt inviato al modello, per poterlo ispezionare dopo una richiesta.
+
+    Non fa nulla se la variabile d'ambiente PROMPT_DEBUG_FILE non è impostata.
+
+    Args:
+        prompt_value: Prompt già composto.
+    """
     prompt_path = os.getenv("PROMPT_DEBUG_FILE")
     if not prompt_path:
         return
@@ -64,7 +89,7 @@ def _save_last_prompt(prompt_value) -> None:
     payload = {
         "messages": [
             {"role": message.type, "content": message.content}
-            for message in prompt_value.messages
+            for message in prompt_value.to_messages()
         ]
     }
     destination = Path(prompt_path)
@@ -78,9 +103,16 @@ def _save_last_prompt(prompt_value) -> None:
 
 
 def _build_context(sources: list[dict]) -> str:
-    """Join the sources grouped by file: files by their best-ranked chunk, chunks in source order.
+    """Unisce le fonti raggruppandole per file.
 
-    Gli import del modulo, ripetuti in ogni chunk, restano solo sul primo chunk di ogni file.
+    I file seguono l'ordine del loro chunk migliore e i chunk di un file l'ordine del sorgente. Gli
+    import del modulo, ripetuti in ogni chunk, restano solo sul primo chunk di ogni file.
+
+    Args:
+        sources: Fonti in ordine di rilevanza.
+
+    Returns:
+        Il contesto da inserire nel prompt.
     """
     file_rank: dict[str, int] = {}
     for rank, source in enumerate(sources):
@@ -100,10 +132,17 @@ async def retrieve_only(
     options: RetrievalOptions = RetrievalOptions(),
     subquestions: list[str] | None = None,
 ) -> tuple[list[str], list[dict], list[dict]]:
-    """Run planner + retrieval without generation; returns (subquestions, sources, dropped).
+    """Esegue planner e retrieval senza generare la risposta.
 
-    Con `subquestions` il planner non viene chiamato: si riusa un piano gia' calcolato.
-    `dropped` sono i candidati rimasti fuori dal contesto (diagnostica per il benchmark).
+    Args:
+        question: Domanda dell'utente.
+        use_planner: True per scomporre la domanda con il planner.
+        options: Interruttori degli stadi di retrieval.
+        subquestions: Piano già calcolato; se presente il planner non viene chiamato.
+
+    Returns:
+        Le sotto-domande usate, le fonti del contesto e i candidati rimasti fuori dal contesto
+        (diagnostica per il benchmark).
     """
     if subquestions is None:
         subquestions = (
@@ -120,8 +159,19 @@ async def stream_expert_response(
     use_planner: bool = True,
     use_reasoning: bool = False,
     options: RetrievalOptions = RetrievalOptions(),
-):
-    """Yield sources metadata then generated answer chunks for the API streaming response."""
+) -> AsyncIterator[str]:
+    """Risponde alla domanda trasmettendo prima le fonti e poi il testo generato.
+
+    Args:
+        question: Domanda dell'utente.
+        use_planner: True per scomporre la domanda con il planner.
+        use_reasoning: True per trasmettere anche il ragionamento del modello.
+        options: Interruttori degli stadi di retrieval.
+
+    Yields:
+        Righe JSON con un evento ciascuna: `sources` (fonti, sotto-domande e mappa), poi `reasoning` e
+        `answer` a mano a mano che il modello genera.
+    """
     subquestions, sources, _ = await retrieve_only(question, use_planner, options)
     context = _build_context(sources)
     repo_map = _repo_map() if options.use_repo_map else ""

@@ -1,11 +1,14 @@
-"""Orchestration for semantic indexing into the Qdrant collection."""
+"""Orchestrazione dell'indicizzazione semantica nella collection Qdrant."""
 
 from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 from langchain_core.documents import Document
+
+from config import BATCH_SIZE, INDEX_COMPLETE_FILE, QDRANT_COLLECTION
 
 from ..services.embedding import encode_documents, load_indexing_model
 from ..services.embedding_cache import EmbeddingCache
@@ -17,8 +20,6 @@ from ..services.qdrant import (
     upsert_encoded_documents,
     wait_for_qdrant,
 )
-from config import BATCH_SIZE, INDEX_COMPLETE_FILE, QDRANT_COLLECTION
-
 from .chunking import PythonASTContextualChunker, fallback_text_split
 from .discovery import iter_source_files
 from .repo_map import save_repo_map
@@ -27,8 +28,15 @@ from .symbol_graph import build_symbol_graph, chunk_relations, save_symbol_graph
 logger = logging.getLogger("EspertoIndexing")
 
 
-def _chunk_sources(files: list) -> list[Document]:
-    """Create semantic documents for all supported source files."""
+def _chunk_sources(files: list[Path]) -> list[Document]:
+    """Crea i chunk di tutti i file sorgente.
+
+    Args:
+        files: File da indicizzare.
+
+    Returns:
+        I documenti prodotti; un file che non si riesce a elaborare viene saltato e segnalato nel log.
+    """
     documents: list[Document] = []
     for path in files:
         try:
@@ -40,12 +48,19 @@ def _chunk_sources(files: list) -> list[Document]:
             else:
                 documents.extend(fallback_text_split(path, text))
         except Exception as error:
-            logger.error("Errore processamento %s: %s", path, error)
+            logger.error("Errore nell'elaborazione di %s: %s", path, error)
     return documents
 
 
 def _add_relation_headers(documents: list[Document], relations: dict[str, dict[str, list[str]]]) -> None:
-    """Prepend to each chunk what it inherits from and calls, so the answering model reads it."""
+    """Antepone a ogni chunk le classi da cui eredita e i simboli che chiama.
+
+    Le righe `# EREDITA DA` e `# CHIAMA` sono lette dal modello che risponde.
+
+    Args:
+        documents: Chunk da completare, modificati sul posto.
+        relations: Per ogni chunk_id, i nomi sotto le chiavi `inherits` e `calls`.
+    """
     for document in documents:
         related = relations.get(document.metadata["chunk_id"], {})
         labels = (("EREDITA DA", related.get("inherits")), ("CHIAMA", related.get("calls")))
@@ -54,7 +69,12 @@ def _add_relation_headers(documents: list[Document], relations: dict[str, dict[s
 
 
 def build_index() -> None:
-    """Build or reuse the persistent index for the configured codebase."""
+    """Costruisce l'indice persistente della codebase configurata, o riusa quello esistente.
+
+    Se sorgenti e configurazione non sono cambiati l'indicizzazione viene saltata. Altrimenti il nuovo
+    indice nasce in una collection separata e sostituisce quello attivo solo a costruzione completata,
+    insieme a symbol graph, mappa del repository e stato.
+    """
     start_time = time.time()
     client = wait_for_qdrant()
     source_files = iter_source_files()
@@ -67,14 +87,14 @@ def build_index() -> None:
         return
 
     # Il nuovo indice nasce in una collection a parte: quello attivo resta servito
-    # (con il suo symbol graph e il suo stato) finche' la costruzione non e' completa.
+    # (con il suo symbol graph e il suo stato) finché la costruzione non è completa.
     collection = f"{QDRANT_COLLECTION}_{int(start_time)}"
     create_collection(client, collection)
     model = load_indexing_model()
     graph = build_symbol_graph(source_files)
     documents = _chunk_sources(source_files)
     relations = chunk_relations(graph)
-    # Batch di chunk di lunghezza simile: ogni batch e' allungato fino al suo testo piu' lungo.
+    # Batch di chunk di lunghezza simile: ogni batch è allungato fino al suo testo più lungo.
     documents.sort(key=lambda document: len(document.page_content))
     cache = EmbeddingCache()
     logger.info("Avvio indicizzazione di %d chunk semantici.", len(documents))
@@ -82,7 +102,7 @@ def build_index() -> None:
     for start in range(0, len(documents), BATCH_SIZE):
         batch = documents[start : start + BATCH_SIZE]
         batch_start_time = time.time()
-        # L'intestazione con le relazioni e' aggiunta dopo l'encoding: i nomi dei simboli
+        # L'intestazione con le relazioni è aggiunta dopo l'encoding: i nomi dei simboli
         # chiamati, nel testo indicizzato, farebbero somigliare un chunk alle domande su di essi.
         encoded = encode_documents(model, batch, cache)
         _add_relation_headers(batch, relations)

@@ -1,4 +1,4 @@
-"""Compact, deterministic repository overview injected into every prompt."""
+"""Mappa compatta e deterministica del repository, inserita in ogni prompt."""
 
 from __future__ import annotations
 
@@ -18,11 +18,27 @@ _HIERARCHY_TITLE = "GERARCHIA DELLE CLASSI (classe base <- sottoclassi dirette):
 
 
 def _is_test(filename: str) -> bool:
+    """Indica se un file appartiene ai test.
+
+    Args:
+        filename: Percorso relativo del file.
+
+    Returns:
+        True se una parte del percorso, cartella o nome del file, inizia per `test`.
+    """
     return any(part.startswith("test") for part in Path(filename).parts)
 
 
 def _readme_intro(files: list[Path], max_chars: int) -> str:
-    """Opening of the README closest to the repository root, after its leading badges and HTML."""
+    """Estrae l'apertura del README più vicino alla radice, senza badge e HTML iniziali.
+
+    Args:
+        files: File della codebase.
+        max_chars: Lunghezza massima del testo riportato.
+
+    Returns:
+        La sezione `README (...)` della mappa, oppure una stringa vuota se non c'è alcun README.
+    """
     readmes = [path for path in files if path.stem.lower() == "readme"]
     if not readmes:
         return ""
@@ -37,7 +53,15 @@ def _readme_intro(files: list[Path], max_chars: int) -> str:
 
 
 def _folders(files: list[Path], max_chars: int) -> str:
-    """One line per folder with its file count, at the deepest level that fits the budget."""
+    """Elenca le cartelle con il numero di file, al livello più profondo che rientra nel budget.
+
+    Args:
+        files: File della codebase.
+        max_chars: Lunghezza massima dell'elenco.
+
+    Returns:
+        La sezione `CARTELLE` della mappa, con una riga per cartella.
+    """
     parents = [Path(relative_path(path)).parent.parts for path in files]
     for depth in range(max(map(len, parents), default=0), -1, -1):
         counts = Counter("/".join(parts[:depth]) or "." for parts in parents)
@@ -48,7 +72,17 @@ def _folders(files: list[Path], max_chars: int) -> str:
 
 
 def _class_hierarchy(graph: dict, max_chars: int) -> str:
-    """Base classes with their direct subclasses, the most extended first; tests are left out."""
+    """Elenca le classi base con le loro sottoclassi dirette, a partire dalla più estesa.
+
+    Le classi dei test sono escluse.
+
+    Args:
+        graph: Symbol graph della codebase.
+        max_chars: Lunghezza massima della sezione.
+
+    Returns:
+        La sezione della gerarchia delle classi, oppure una stringa vuota se non ci sono ereditarietà.
+    """
     classes = {
         node["id"]: node["name"]
         for node in graph["nodes"]
@@ -69,17 +103,30 @@ def _class_hierarchy(graph: dict, max_chars: int) -> str:
 
 
 def build_repo_map(files: list[Path], graph: dict) -> str:
-    """README opening, folders, and class hierarchy, within REPO_MAP_MAX_CHARS."""
+    """Compone la mappa del repository: apertura del README, cartelle e gerarchia delle classi.
+
+    Args:
+        files: File della codebase.
+        graph: Symbol graph della codebase.
+
+    Returns:
+        Il testo della mappa, entro REPO_MAP_MAX_CHARS caratteri.
+    """
     text = _readme_intro(files, REPO_MAP_MAX_CHARS // 4)
     text += _folders(files, REPO_MAP_MAX_CHARS // 2 - len(text))
     return (text + _class_hierarchy(graph, REPO_MAP_MAX_CHARS - len(text))).rstrip()
 
 
 def save_repo_map(files: list[Path], graph: dict) -> None:
-    """Persist the repository map next to the symbol graph."""
+    """Salva la mappa del repository accanto al symbol graph, con una scrittura atomica.
+
+    Args:
+        files: File della codebase.
+        graph: Symbol graph della codebase.
+    """
     repo_map = build_repo_map(files, graph)
     REPO_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
     temporary_file = REPO_MAP_FILE.with_suffix(".tmp")
     temporary_file.write_text(repo_map, encoding="utf-8")
     temporary_file.replace(REPO_MAP_FILE)
-    logger.info("Repository map saved: %d characters.", len(repo_map))
+    logger.info("Mappa del repository salvata: %d caratteri.", len(repo_map))

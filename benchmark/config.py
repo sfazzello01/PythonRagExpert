@@ -1,4 +1,4 @@
-"""Configurazione del servizio di benchmark (variabili d'ambiente)."""
+"""Configurazione del servizio di benchmark, letta dalle variabili d'ambiente."""
 
 import os
 from pathlib import Path

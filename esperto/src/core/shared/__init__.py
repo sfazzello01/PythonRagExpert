@@ -1,1 +1,1 @@
-"""Shared value types, configuration adapters, and small utilities."""
+"""Opzioni e funzioni di utilità condivise da indicizzazione e retrieval."""

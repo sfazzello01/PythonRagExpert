@@ -1,4 +1,4 @@
-"""Semantic Python AST chunking and generic text fallback chunking."""
+"""Chunking semantico dei file Python tramite AST e suddivisione testuale degli altri file."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import INDEX_CHUNK_OVERLAP, INDEX_CHUNK_SIZE
+
 from .discovery import relative_path, service_for_path
 
 logger = logging.getLogger("EspertoChunking")
@@ -23,11 +24,26 @@ _FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
 def _methods(node: ast.ClassDef) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Elenca i metodi definiti direttamente nel corpo di una classe.
+
+    Args:
+        node: Definizione della classe.
+
+    Returns:
+        I metodi, sincroni e asincroni, nell'ordine del sorgente.
+    """
     return [child for child in node.body if isinstance(child, _FUNCTION_NODES)]
 
 
 def splits_into_methods(node: ast.AST) -> bool:
-    """Return whether a class is indexed as a header chunk plus one chunk per method."""
+    """Indica se una classe è indicizzata come intestazione più un chunk per metodo.
+
+    Args:
+        node: Nodo AST da valutare.
+
+    Returns:
+        True se il nodo è una classe più lunga di CLASS_SPLIT_MIN_LINES righe con almeno un metodo.
+    """
     return (
         isinstance(node, ast.ClassDef)
         and node.end_lineno - node.lineno + 1 > CLASS_SPLIT_MIN_LINES
@@ -36,19 +52,45 @@ def splits_into_methods(node: ast.AST) -> bool:
 
 
 def symbol_chunk_id(relative_path: str, qualified_name: str, node: ast.AST) -> str:
-    """Stable chunk ID shared with the symbol graph, anchored to the def/class line."""
+    """Calcola l'ID stabile del chunk di un simbolo, condiviso con il symbol graph.
+
+    Args:
+        relative_path: Percorso del file relativo alla radice della codebase.
+        qualified_name: Nome del simbolo (`Classe.metodo` per i metodi).
+        node: Definizione del simbolo, di cui si usano la riga di `def`/`class` e quella finale.
+
+    Returns:
+        L'hash MD5 esadecimale che identifica il chunk.
+    """
     return hashlib.md5(
         f"{relative_path}::{qualified_name}::{node.lineno - 1}::{node.end_lineno}".encode("utf-8")
     ).hexdigest()
 
 
 def _first_line(node: ast.AST) -> int:
-    """Zero-based first source line of a definition, decorators included."""
+    """Trova la prima riga di una definizione, decoratori compresi.
+
+    Args:
+        node: Definizione di funzione o classe.
+
+    Returns:
+        L'indice della riga, contato da zero.
+    """
     return min((decorator.lineno for decorator in node.decorator_list), default=node.lineno) - 1
 
 
 def fallback_text_split(path: Path, text: str) -> list[Document]:
-    """Chunk a non-Python file while preserving its source metadata."""
+    """Divide un file in blocchi di testo, conservandone i metadati di origine.
+
+    È usata per i file non Python e per quelli Python con errori di sintassi.
+
+    Args:
+        path: Percorso del file.
+        text: Contenuto del file.
+
+    Returns:
+        Un documento per blocco, con file, servizio e ID del chunk nei metadati.
+    """
     filename = relative_path(path)
     service = service_for_path(path)
     chunks = RecursiveCharacterTextSplitter(
@@ -76,9 +118,15 @@ def fallback_text_split(path: Path, text: str) -> list[Document]:
 
 
 class PythonASTContextualChunker:
-    """Create function and class chunks enriched with module-level context."""
+    """Crea i chunk di funzioni e classi di un file Python, arricchiti con il contesto del modulo."""
 
     def __init__(self, file_path: Path, code: str):
+        """Prepara il chunker per un file.
+
+        Args:
+            file_path: Percorso del file Python.
+            code: Sorgente del file.
+        """
         self.file_path = file_path
         self.relative_path = relative_path(file_path)
         self.code = code
@@ -86,11 +134,17 @@ class PythonASTContextualChunker:
         self.imports_context = ""
 
     def extract_chunks(self) -> list[Document]:
-        """Return semantic chunks for top-level Python symbols and global code."""
+        """Estrae i chunk semantici del file.
+
+        Returns:
+            Un documento per ogni funzione o classe di primo livello (le classi lunghe sono spezzate in
+            intestazione e metodi) e uno per il codice globale; con un errore di sintassi, i blocchi di
+            testo prodotti da `fallback_text_split`.
+        """
         try:
             tree = ast.parse(self.code)
         except SyntaxError as error:
-            logger.warning("Syntax error in %s: %s; using text splitter.", self.relative_path, error)
+            logger.warning("Errore di sintassi in %s: %s; uso la suddivisione testuale.", self.relative_path, error)
             return fallback_text_split(self.file_path, self.code)
 
         imports = [
@@ -133,10 +187,27 @@ class PythonASTContextualChunker:
         return documents
 
     def _source(self, node: ast.AST) -> str:
+        """Estrae il sorgente di una definizione, decoratori compresi.
+
+        Args:
+            node: Definizione di funzione, metodo o classe.
+
+        Returns:
+            Le righe del file che contengono la definizione.
+        """
         return "".join(self.lines[_first_line(node) : node.end_lineno])
 
     def _split_class(self, node: ast.ClassDef) -> list[Document]:
-        """Chunk a large class as its skeleton (signature, docstring, attributes, method signatures) plus its methods."""
+        """Spezza una classe lunga in un chunk di intestazione e un chunk per metodo.
+
+        L'intestazione contiene firma, docstring e attributi della classe, più le firme dei metodi.
+
+        Args:
+            node: Definizione della classe.
+
+        Returns:
+            Il documento dell'intestazione seguito da quelli dei metodi.
+        """
         methods = _methods(node)
         method_lines = {
             index for method in methods for index in range(_first_line(method), method.end_lineno)
@@ -157,12 +228,29 @@ class PythonASTContextualChunker:
         ]
 
     def _signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-        """The `def` line(s) of a method, without decorators and body."""
+        """Estrae la firma di un metodo, senza decoratori né corpo.
+
+        Args:
+            node: Definizione del metodo.
+
+        Returns:
+            Le righe del `def` seguite da ` ...`.
+        """
         lines = self.lines[node.lineno - 1 : node.body[0].lineno - 1] or [self.lines[node.lineno - 1]]
         return "".join(lines).rstrip() + " ...\n"
 
     def _symbol_document(self, node: ast.AST, chunk_type: str, name: str, source: str) -> Document:
-        """Build the chunk of a function, class, or method (`name` is `Class.method` for methods)."""
+        """Costruisce il chunk di una funzione, classe o metodo.
+
+        Args:
+            node: Definizione del simbolo.
+            chunk_type: Tipo di chunk: `function`, `class` o `method`.
+            name: Nome del simbolo (`Classe.metodo` per i metodi).
+            source: Sorgente da inserire nel chunk.
+
+        Returns:
+            Il documento con intestazione, import del modulo, sorgente e metadati del simbolo.
+        """
         service = service_for_path(self.file_path)
         route_metadata = ""
         for decorator in node.decorator_list:

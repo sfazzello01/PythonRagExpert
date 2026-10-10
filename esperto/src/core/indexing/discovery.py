@@ -1,4 +1,4 @@
-"""Source discovery for the codebase indexing pipeline."""
+"""Scoperta dei file sorgente da indicizzare."""
 
 from __future__ import annotations
 
@@ -8,7 +8,14 @@ from config import BASE_DIR, SKIP_DIRS, SUPPORTED_EXTENSIONS
 
 
 def relative_path(path: Path) -> str:
-    """Return the POSIX path relative to the indexed codebase root."""
+    """Calcola il percorso POSIX di un file rispetto alla radice della codebase indicizzata.
+
+    Args:
+        path: Percorso del file.
+
+    Returns:
+        Il percorso relativo a BASE_DIR, oppure il percorso invariato se il file ne è fuori.
+    """
     try:
         return path.relative_to(BASE_DIR).as_posix()
     except ValueError:
@@ -16,7 +23,14 @@ def relative_path(path: Path) -> str:
 
 
 def service_for_path(path: Path) -> str:
-    """Return the first project-directory segment for a source file."""
+    """Ricava il servizio a cui appartiene un file: il primo segmento del suo percorso relativo.
+
+    Args:
+        path: Percorso del file.
+
+    Returns:
+        Il primo segmento del percorso relativo a BASE_DIR, oppure `root` se il file ne è fuori.
+    """
     try:
         return path.relative_to(BASE_DIR).parts[0]
     except (ValueError, IndexError):
@@ -24,7 +38,11 @@ def service_for_path(path: Path) -> str:
 
 
 def iter_source_files() -> list[Path]:
-    """Return deterministic, supported source files under the codebase root."""
+    """Elenca i file sorgente supportati sotto la radice della codebase.
+
+    Returns:
+        I percorsi in ordine alfabetico, senza le cartelle escluse e le estensioni non supportate.
+    """
     return sorted(
         path
         for path in BASE_DIR.rglob("*")

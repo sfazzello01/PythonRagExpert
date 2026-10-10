@@ -1,27 +1,27 @@
-"""Dense retrieval, same-file and symbol-graph enrichment, final rerank, and context budget."""
+"""Ricerca densa, arricchimento con stesso file e symbol graph, rerank finale e budget del contesto."""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from itertools import chain
-from typing import Iterable
 
 from langchain_core.documents import Document
 from qdrant_client import AsyncQdrantClient  # type: ignore
 from qdrant_client.http.models import FieldCondition, Filter, MatchValue  # type: ignore
 
 from config import (
-    K,
     RAG_CONTEXT_MAX_CHARS,
     RAG_CONTEXT_MAX_SOURCES,
     SEMANTIC_RELEVANCE_RATIO,
     SYMBOL_GRAPH_MAX_NEIGHBORS,
+    K,
 )
 
 from ..services.embedding import encode_queries
 from ..services.qdrant import (
-    get_async_client,
     dense_search,
+    get_async_client,
     get_documents_by_chunk_ids,
     rerank_chunk_ids,
 )
@@ -29,16 +29,24 @@ from ..services.symbol_graph import SymbolGraph
 from ..shared.options import RetrievalOptions
 from ..shared.text import sanitize_text, without_imports
 
+# Chunk più simili alla domanda presi, al massimo, da ogni file dei risultati della ricerca.
 SAME_FILE_LIMIT = 4
 # Risultati i cui vicini diretti nel grafo hanno la precedenza sugli altri.
 TOP_SEEDS = 3
-# Stadio che porta un chunk tra i candidati, dal piu' semplice: se piu' stadi trovano lo stesso
-# chunk vale il primo, cosi' si legge quanto ogni stadio aggiunge alla sola ricerca.
+# Stadio che porta un chunk tra i candidati, dal più semplice: se più stadi trovano lo stesso
+# chunk vale il primo, così si legge quanto ogni stadio aggiunge alla sola ricerca.
 ORIGINS = ("search", "symbol", "same_file", "graph")
 
 
 def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
-    """Deduplicate chunks by chunk_id while retaining their best score."""
+    """Elimina i chunk duplicati per chunk_id, conservando per ciascuno lo score migliore.
+
+    Args:
+        documents: Chunk con lo score nel metadato `_score`.
+
+    Returns:
+        Un documento per chunk_id, nell'ordine della prima comparsa.
+    """
     by_id: dict[str, Document] = {}
     for document in documents:
         previous = by_id.get(document.metadata["chunk_id"])
@@ -48,9 +56,19 @@ def _keep_highest_scoring(documents: Iterable[Document]) -> list[Document]:
 
 
 def _apply_context_budget(documents: Iterable[Document], max_sources: int, max_chars: int) -> list[Document]:
-    """Keep ranked documents within the given source-count and character budgets.
+    """Seleziona i documenti che rientrano nei limiti di numero e di caratteri del contesto.
 
-    Gli import del modulo contano una volta per file, come nel contesto mostrato al modello.
+    Gli import del modulo contano una volta per file, come nel contesto mostrato al modello. Un
+    documento che farebbe superare i caratteri viene saltato (il primo entra comunque) e si prova con i
+    successivi.
+
+    Args:
+        documents: Documenti in ordine di priorità.
+        max_sources: Numero massimo di documenti.
+        max_chars: Numero massimo di caratteri complessivi.
+
+    Returns:
+        I documenti selezionati, nell'ordine ricevuto.
     """
     selected: list[Document] = []
     filenames: set[str] = set()
@@ -70,6 +88,16 @@ def _apply_context_budget(documents: Iterable[Document], max_sources: int, max_c
 
 
 def _to_source(document: Document, score: float | None, origin: str) -> dict:
+    """Converte un chunk nella fonte restituita dall'API.
+
+    Args:
+        document: Chunk recuperato.
+        score: Similarità con la domanda originale; None per i vicini del grafo.
+        origin: Stadio che ha portato il chunk tra i candidati.
+
+    Returns:
+        I metadati del chunk con score, origine, relazione nel grafo e testo.
+    """
     metadata = document.metadata
     return {
         "filename": metadata.get("filename"),
@@ -87,16 +115,34 @@ def _to_source(document: Document, score: float | None, origin: str) -> dict:
 
 
 class Retriever:
-    """Retrieve ranked codebase context from the BGE-M3 Qdrant index."""
+    """Recupera dall'indice Qdrant (BGE-M3) il contesto ordinato con cui rispondere a una domanda."""
 
     def __init__(self, client: AsyncQdrantClient | None = None):
+        """Crea il retriever.
+
+        Args:
+            client: Client Qdrant asincrono; se manca ne viene creato uno.
+        """
         self._client = client or get_async_client()
         self._symbol_graph = SymbolGraph()
 
     async def _candidates(
         self, question: str, query_vector: list[float], options: RetrievalOptions
     ) -> list[Document]:
-        """Candidate chunks for one question: dense search, named symbols, same-file chunks, graph neighbors."""
+        """Raccoglie i chunk candidati per una domanda.
+
+        I candidati vengono da ricerca densa, simboli nominati nella domanda, altri chunk degli stessi file
+        e vicini nel symbol graph; ognuno porta nel metadato `_origin` lo stadio che l'ha trovato.
+
+        Args:
+            question: Domanda o sotto-domanda.
+            query_vector: Vettore denso della domanda.
+            options: Interruttori degli stadi di retrieval.
+
+        Returns:
+            I candidati: prima i simboli nominati, poi i risultati della ricerca con i chunk degli stessi
+            file, infine i vicini del grafo.
+        """
         named_ids = self._symbol_graph.chunks_named(question) if options.use_symbol_lookup else []
         # La soglia di rilevanza vale solo qui: chunk dello stesso file e rerank finale
         # servono a dare contesto e a ordinare, non a selezionare.
@@ -148,21 +194,25 @@ class Retriever:
         original_question: str,
         options: RetrievalOptions = RetrievalOptions(),
     ) -> tuple[list[dict], list[dict]]:
-        """Return the ranked sources for the original question and its planner sub-questions.
+        """Recupera le fonti per la domanda originale e per le sotto-domande del planner.
 
-        Il secondo elemento elenca i candidati rimasti fuori dal contesto (senza testo): serve
-        al benchmark per distinguere un chunk mai trovato da uno trovato e tagliato dal budget.
+        Tutti i candidati sono rivalutati sulla domanda originale e poi tagliati dal budget del contesto.
+
+        Args:
+            questions: Sotto-domande del planner.
+            original_question: Domanda dell'utente.
+            options: Interruttori degli stadi di retrieval.
+
+        Returns:
+            Le fonti in ordine di rilevanza e i candidati rimasti fuori dal contesto (senza testo): al
+            benchmark servono per distinguere un chunk mai trovato da uno trovato e tagliato dal budget.
         """
         original_question = sanitize_text(original_question).strip()
         retrieval_questions = [
             original_question,
-            *(
-                question
-                for question in questions
-                if question.casefold() != original_question.casefold()
-            ),
+            *(question for question in questions if question.casefold() != original_question.casefold()),
         ]
-        # Un solo passaggio BGE-M3 per tutte le domande; il primo vettore e' la domanda originale.
+        # Un solo passaggio BGE-M3 per tutte le domande; il primo vettore è la domanda originale.
         query_vectors = await asyncio.to_thread(encode_queries, retrieval_questions)
         candidates = await asyncio.gather(
             *(
@@ -195,7 +245,7 @@ class Retriever:
         )
         # I vicini del grafo servono proprio quando non somigliano alla domanda: saltano il
         # rerank e hanno una quota riservata per ogni domanda, proporzionale ai loro posti
-        # e mai oltre meta' del budget.
+        # e mai oltre metà del budget.
         max_neighbors = SYMBOL_GRAPH_MAX_NEIGHBORS * len(retrieval_questions)
         graph_share = min(max_neighbors / RAG_CONTEXT_MAX_SOURCES, 0.5)
         graph_documents = _apply_context_budget(
@@ -214,8 +264,12 @@ class Retriever:
             sources.append(_to_source(document, scores.get(chunk_id), origins[chunk_id]))
         kept = {source["chunk_id"] for source in sources}
         dropped = [
-            {"filename": document.metadata.get("filename"), "symbol_name": document.metadata.get("symbol_name"),
-             "chunk_id": chunk_id, "origin": origins[chunk_id]}
+            {
+                "filename": document.metadata.get("filename"),
+                "symbol_name": document.metadata.get("symbol_name"),
+                "chunk_id": chunk_id,
+                "origin": origins[chunk_id],
+            }
             for chunk_id, document in {**neighbors, **documents}.items()
             if chunk_id not in kept
         ]

@@ -1,4 +1,4 @@
-"""Bounded LLM planning for multi-part codebase questions."""
+"""Planner LLM che scompone in sotto-domande le domande composite sulla codebase."""
 
 from __future__ import annotations
 
@@ -31,17 +31,23 @@ _MAP_GROUNDING = (
 
 
 def parse_subquestions(content: str, original_question: str) -> list[str]:
-    """Validate planner output and fall back to the original question."""
+    """Valida l'output del planner, ripiegando sulla domanda originale se non è utilizzabile.
+
+    Args:
+        content: Testo restituito dal modello, che deve contenere il JSON delle sotto-domande.
+        original_question: Domanda dell'utente.
+
+    Returns:
+        Al massimo quattro sotto-domande distinte; la sola domanda originale se l'output non è valido o
+        non ne contiene.
+    """
     cleaned_original = sanitize_text(original_question).strip()
     try:
         json_start = content.index("{")
         payload, _ = json.JSONDecoder().raw_decode(content[json_start:])
         candidates = payload.get("subquestions", [])
     except (ValueError, json.JSONDecodeError, AttributeError):
-        logger.warning(
-            "Planner returned invalid JSON; using original question. Output: %r",
-            content[:300],
-        )
+        logger.warning("JSON del planner non valido: uso la domanda originale. Output: %r", content[:300])
         return [cleaned_original] if cleaned_original else []
     if not isinstance(candidates, list):
         return [cleaned_original] if cleaned_original else []
@@ -60,7 +66,16 @@ def parse_subquestions(content: str, original_question: str) -> list[str]:
 
 
 async def plan_subquestions(question: str, llm: Any, repo_map: str = "") -> list[str]:
-    """Ask the local LLM for a small retrieval plan, grounded on the repository map when given."""
+    """Chiede al modello locale un piano di retrieval, ancorato alla mappa del repository se fornita.
+
+    Args:
+        question: Domanda dell'utente.
+        llm: Modello di chat con il metodo asincrono `ainvoke`.
+        repo_map: Mappa del repository; vuota per non usarla.
+
+    Returns:
+        Le domande con cui cercare; la sola domanda originale se il planner fallisce.
+    """
     prompt = _PLANNER_PROMPT.format(
         grounding=_MAP_GROUNDING if repo_map else _BLIND_GROUNDING,
         repo_map=f"MAPPA DEL REPOSITORY:\n{repo_map}\n\n" if repo_map else "",
@@ -70,8 +85,8 @@ async def plan_subquestions(question: str, llm: Any, repo_map: str = "") -> list
         response = await llm.ainvoke(prompt)
         content = response.content if isinstance(response.content, str) else ""
     except Exception as error:
-        logger.warning("Planner failed; using original question: %s", error)
+        logger.warning("Planner fallito: uso la domanda originale. Errore: %s", error)
         return [question]
     subquestions = parse_subquestions(content, question)
-    logger.info("Planner produced %d retrieval question(s).", len(subquestions))
+    logger.info("Il planner ha prodotto %d domande di retrieval.", len(subquestions))
     return subquestions

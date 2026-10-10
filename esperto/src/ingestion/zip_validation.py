@@ -14,24 +14,23 @@ class ZipValidationError(ValueError):
 
 
 def validate_zip(content: bytes, filename: str) -> list[str]:
-    """
-    Valida un archivio ZIP caricato e restituisce la lista dei nomi file ammessi.
+    """Valida un archivio ZIP caricato e ne elenca i file ammessi.
 
     Args:
         content: Contenuto binario del file caricato.
-        filename: Nome originale del file (per messaggi di errore).
+        filename: Nome originale del file, di cui si controlla l'estensione.
 
     Returns:
-        Lista ordinata dei nomi dei file estrabili.
+        I nomi dei file indicizzabili, in ordine alfabetico.
 
     Raises:
-        ZipValidationError: Se l'archivio non e' valido o contiene voci non ammesse.
+        ZipValidationError: Se l'archivio non è valido, è troppo grande o contiene voci non ammesse.
     """
     if not filename.lower().endswith(".zip"):
         raise ZipValidationError("Il file deve avere estensione .zip")
 
-    if len(content) == 0:
-        raise ZipValidationError("Il file caricato e' vuoto")
+    if not content:
+        raise ZipValidationError("Il file caricato è vuoto")
 
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     if len(content) > max_bytes:
@@ -40,20 +39,18 @@ def validate_zip(content: bytes, filename: str) -> list[str]:
             f"(massimo {MAX_UPLOAD_MB} MB)"
         )
 
-    if not content.startswith(b"PK\x03\x04") and not content.startswith(b"PK\x05\x06"):
-        raise ZipValidationError("Il file non e' un archivio ZIP valido")
+    if not content.startswith((b"PK\x03\x04", b"PK\x05\x06")):
+        raise ZipValidationError("Il file non è un archivio ZIP valido")
 
     try:
         archive = zipfile.ZipFile(io.BytesIO(content))
-    except zipfile.BadZipFile as e:
-        raise ZipValidationError(f"Archivio ZIP corrotto: {e}") from e
+    except zipfile.BadZipFile as error:
+        raise ZipValidationError(f"Archivio ZIP corrotto: {error}") from error
 
     with archive:
         # Prima di testzip(), che decomprime l'intero archivio (zip bomb).
         if sum(info.file_size for info in archive.infolist()) > MAX_EXTRACTED_MB * 1024 * 1024:
-            raise ZipValidationError(
-                f"Archivio troppo grande una volta estratto (massimo {MAX_EXTRACTED_MB} MB)"
-            )
+            raise ZipValidationError(f"Archivio troppo grande una volta estratto (massimo {MAX_EXTRACTED_MB} MB)")
         if archive.testzip() is not None:
             raise ZipValidationError("Archivio ZIP corrotto: checksum non valido")
 
@@ -64,11 +61,10 @@ def validate_zip(content: bytes, filename: str) -> list[str]:
             if info.is_dir():
                 continue
 
-            # Path traversal e path assoluti
+            # Path traversal e path assoluti.
             normalized = name.replace("\\", "/")
             if (
-                normalized.startswith("/")
-                or normalized.startswith("..")
+                normalized.startswith(("/", ".."))
                 or "/../" in normalized
                 or (len(normalized) > 1 and normalized[1] == ":")
             ):

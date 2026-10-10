@@ -1,1 +1,1 @@
-"""Infrastructure services used by indexing, retrieval, and the API."""
+"""Servizi di infrastruttura usati da indicizzazione, retrieval e API."""

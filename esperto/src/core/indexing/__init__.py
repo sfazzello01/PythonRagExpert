@@ -1,1 +1,1 @@
-"""Codebase discovery, semantic chunking, and index-build orchestration."""
+"""Scoperta dei sorgenti, chunking semantico e costruzione dell'indice."""

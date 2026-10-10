@@ -1,7 +1,7 @@
 """Report di un run: diagnosi, tabelle, summary e confronto tra run.
 
-Il report risponde a tre domande: dove si perdono i simboli attesi (ricerca o budget), quanto
-conta ogni stadio (ablation), e se un fatto sbagliato dipende dal retrieval o dal modello.
+Il report risponde a tre domande: dove si perdono i simboli attesi (ricerca o budget), quanto conta
+ogni stadio (ablation), e se un fatto sbagliato dipende dal retrieval o dal modello.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import csv
 import hashlib
 import json
 from pathlib import Path
-from typing import Optional
 
 from .metrics import LOST, ORIGINS, bootstrap_ci, mean, paired_bootstrap_diff, percentile, share
 
@@ -50,24 +49,60 @@ MAX_ROWS = 20
 # --- Caricamento ---
 
 def _load_lines(path: Path) -> list[dict]:
+    """Legge un file JSON Lines.
+
+    Args:
+        path: File da leggere.
+
+    Returns:
+        Un oggetto per riga; nessuno se il file non esiste.
+    """
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
 def _load(path: Path) -> list[dict]:
-    # Dopo una ripresa una domanda puo' comparire due volte: vale l'ultimo tentativo.
+    """Legge le righe di uno stadio, una per ogni coppia configurazione-domanda.
+
+    Args:
+        path: File JSON Lines dello stadio.
+
+    Returns:
+        Le righe senza ripetizioni.
+    """
+    # Dopo una ripresa una domanda può comparire due volte: vale l'ultimo tentativo.
     return list({(row["config"], row["id"]): row for row in _load_lines(path)}.values())
 
 
+def judging_key(run_id: str, config: str, question_id: str) -> str:
+    """Calcola la chiave opaca di una risposta: chi giudica non vede da quale configurazione viene.
+
+    Args:
+        run_id: ID del run.
+        config: Configurazione che ha prodotto la risposta.
+        question_id: ID della domanda.
+
+    Returns:
+        I primi 12 caratteri esadecimali dell'hash SHA-1.
+    """
+    return hashlib.sha1(f"{run_id}:{config}:{question_id}".encode("utf-8")).hexdigest()[:12]
+
+
 def _apply_judgments(run_dir: Path, run_id: str, generation: list[dict]) -> None:
-    """Unisce i verdetti di `judgments.jsonl` alle risposte e ne ricava le metriche."""
+    """Unisce i verdetti di `judgments.jsonl` alle risposte e ne ricava le metriche.
+
+    Args:
+        run_dir: Cartella del run.
+        run_id: ID del run, da cui dipendono le chiavi delle risposte.
+        generation: Righe di generazione, completate sul posto con verdetti e metriche.
+    """
     judgments = {row["key"]: row for row in _load_lines(run_dir / "judgments.jsonl")}
     facts = {row["key"]: row["key_facts"] for row in _load_lines(run_dir / "to_judge.jsonl")}
     for row in generation:
         if row.get("error"):
             continue
-        key = hashlib.sha1(f"{run_id}:{row['config']}:{row['id']}".encode("utf-8")).hexdigest()[:12]
+        key = judging_key(run_id, row["config"], row["id"])
         judgment = judgments.get(key)
         # Un verdetto con un numero di fatti sbagliato viene scartato: la risposta resta non giudicata.
         valid = judgment is not None and key in facts and len(judgment["fact_verdicts"]) == len(facts[key])
@@ -84,7 +119,14 @@ def _apply_judgments(run_dir: Path, run_id: str, generation: list[dict]) -> None
 
 
 def load_run(run_dir: Path) -> tuple[dict, list[dict], list[dict]]:
-    """Manifest, righe di retrieval e righe di generazione (con i verdetti applicati) di un run."""
+    """Carica i dati di un run.
+
+    Args:
+        run_dir: Cartella del run.
+
+    Returns:
+        Il manifest, le righe di retrieval e le righe di generazione con i verdetti applicati.
+    """
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     generation = _load(run_dir / "generation.jsonl")
     _apply_judgments(run_dir, manifest["run_id"], generation)
@@ -94,10 +136,29 @@ def load_run(run_dir: Path) -> tuple[dict, list[dict], list[dict]]:
 # --- Aggregazione ---
 
 def _configs(rows: list[dict]) -> list[str]:
+    """Elenca le configurazioni presenti nelle righe.
+
+    Args:
+        rows: Righe di uno stadio.
+
+    Returns:
+        I nomi delle configurazioni, nell'ordine in cui compaiono.
+    """
     return list(dict.fromkeys(row["config"] for row in rows))
 
 
-def _values(rows: list[dict], config: str, metric: str, category: Optional[str] = None) -> list[float]:
+def _values(rows: list[dict], config: str, metric: str, category: str | None = None) -> list[float]:
+    """Raccoglie i valori di una metrica per una configurazione.
+
+    Args:
+        rows: Righe di uno stadio.
+        config: Configurazione da considerare.
+        metric: Nome della metrica.
+        category: Categoria di domande a cui limitarsi; None per tutte.
+
+    Returns:
+        I valori disponibili, uno per domanda.
+    """
     return [
         row["metrics"][metric]
         for row in rows
@@ -108,6 +169,16 @@ def _values(rows: list[dict], config: str, metric: str, category: Optional[str] 
 
 
 def _by_id(rows: list[dict], config: str, metric: str) -> dict[str, float]:
+    """Associa a ogni domanda il valore di una metrica per una configurazione.
+
+    Args:
+        rows: Righe di uno stadio.
+        config: Configurazione da considerare.
+        metric: Nome della metrica.
+
+    Returns:
+        Il valore della metrica per ID di domanda.
+    """
     return {
         row["id"]: row["metrics"][metric]
         for row in rows
@@ -116,6 +187,15 @@ def _by_id(rows: list[dict], config: str, metric: str) -> dict[str, float]:
 
 
 def _stat(values: list[float]) -> dict:
+    """Riassume una serie di valori.
+
+    Args:
+        values: Valori di una metrica.
+
+    Returns:
+        Numero di valori, media, estremi dell'intervallo di confidenza al 95%, mediana e 95° percentile;
+        senza valori, tutte le statistiche sono None.
+    """
     if not values:
         return {"n": 0, "mean": None, "ci_lo": None, "ci_hi": None, "p50": None, "p95": None}
     low, high = bootstrap_ci(values) if len(values) > 1 else (values[0], values[0])
@@ -126,25 +206,60 @@ def _stat(values: list[float]) -> dict:
 
 
 def _reference(rows: list[dict]) -> str:
-    """Configurazione a cui si riferiscono diagnosi e differenze: `full`, o la prima presente."""
+    """Sceglie la configurazione a cui si riferiscono diagnosi e differenze.
+
+    Args:
+        rows: Righe di uno stadio.
+
+    Returns:
+        `full` se è presente o se non ci sono righe, altrimenti la prima configurazione.
+    """
     configs = _configs(rows)
     return "full" if "full" in configs or not configs else configs[0]
 
 
-def _delta(rows: list[dict], config: str, other: str, metric: str) -> Optional[tuple[float, float, float]]:
-    """Differenza appaiata `config` - `other` sulle domande comuni, con CI 95%."""
+def _delta(rows: list[dict], config: str, other: str, metric: str) -> tuple[float, float, float] | None:
+    """Calcola la differenza appaiata tra due configurazioni sulle domande comuni.
+
+    Args:
+        rows: Righe di uno stadio.
+        config: Configurazione di cui misurare la differenza.
+        other: Configurazione di riferimento.
+        metric: Nome della metrica.
+
+    Returns:
+        La differenza media `config - other` con gli estremi dell'intervallo di confidenza al 95%,
+        oppure None con meno di due domande comuni.
+    """
     a, b = _by_id(rows, config, metric), _by_id(rows, other, metric)
     common = sorted(set(a) & set(b))
     return paired_bootstrap_diff([a[i] for i in common], [b[i] for i in common]) if len(common) > 1 else None
 
 
-def _significant(delta: Optional[tuple[float, float, float]]) -> bool:
+def _significant(delta: tuple[float, float, float] | None) -> bool:
+    """Indica se una differenza è distinguibile da zero.
+
+    Args:
+        delta: Differenza con il suo intervallo di confidenza, oppure None.
+
+    Returns:
+        True se l'intervallo di confidenza esclude lo zero.
+    """
     return delta is not None and (delta[1] > 0 or delta[2] < 0)
 
 
 # --- Celle e tabelle ---
 
-def _cell(values: list[float], number_format: Optional[str] = None) -> str:
+def _cell(values: list[float], number_format: str | None = None) -> str:
+    """Formatta la cella di una tabella a partire dai valori di una metrica.
+
+    Args:
+        values: Valori della metrica.
+        number_format: Formato della sola media; None per mostrare media e intervallo di confidenza.
+
+    Returns:
+        Il testo della cella, `n/d` senza valori.
+    """
     stat = _stat(values)
     if stat["n"] == 0:
         return "n/d"
@@ -153,19 +268,45 @@ def _cell(values: list[float], number_format: Optional[str] = None) -> str:
     return f"{stat['mean']:.2f} [{stat['ci_lo']:.2f}, {stat['ci_hi']:.2f}]"
 
 
-def _delta_cell(delta: Optional[tuple[float, float, float]]) -> str:
+def _delta_cell(delta: tuple[float, float, float] | None) -> str:
+    """Formatta la cella di una differenza appaiata.
+
+    Args:
+        delta: Differenza con il suo intervallo di confidenza, oppure None.
+
+    Returns:
+        Differenza e intervallo, con `*` se l'intervallo esclude lo zero; `n/d` senza differenza.
+    """
     if delta is None:
         return "n/d"
     return f"{delta[0]:+.2f} [{delta[1]:+.2f}, {delta[2]:+.2f}]{'*' if _significant(delta) else ''}"
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
+    """Compone una tabella Markdown.
+
+    Args:
+        headers: Intestazioni delle colonne.
+        rows: Righe, ciascuna con una cella per colonna.
+
+    Returns:
+        Il testo della tabella.
+    """
     lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
     lines += ["| " + " | ".join(row) + " |" for row in rows]
     return "\n".join(lines)
 
 
 def _metric_table(rows: list[dict], columns: list[tuple]) -> str:
+    """Compone la tabella delle metriche per configurazione.
+
+    Args:
+        rows: Righe di uno stadio.
+        columns: Colonne come terne (metrica, etichetta, formato).
+
+    Returns:
+        La tabella Markdown, con una riga per configurazione.
+    """
     return _table(
         ["Config", "N"] + [label for _, label, _ in columns],
         [
@@ -176,6 +317,15 @@ def _metric_table(rows: list[dict], columns: list[tuple]) -> str:
 
 
 def _category_table(rows: list[dict], metric: str) -> str:
+    """Compone la tabella di una metrica per configurazione e categoria di domanda.
+
+    Args:
+        rows: Righe di uno stadio.
+        metric: Nome della metrica.
+
+    Returns:
+        La tabella Markdown, con una colonna per categoria.
+    """
     categories = sorted({row["category"] for row in rows if row.get("metrics", {}).get(metric) is not None})
     return _table(
         ["Config"] + categories,
@@ -184,6 +334,15 @@ def _category_table(rows: list[dict], metric: str) -> str:
 
 
 def _delta_table(rows: list[dict], reference: str) -> str:
+    """Compone la tabella delle differenze di ogni configurazione rispetto a quella di riferimento.
+
+    Args:
+        rows: Righe di retrieval.
+        reference: Configurazione di riferimento.
+
+    Returns:
+        La tabella Markdown, con una riga per configurazione diversa dal riferimento.
+    """
     return _table(
         [f"Config - {reference}"] + list(DELTA_METRICS.values()),
         [
@@ -195,7 +354,24 @@ def _delta_table(rows: list[dict], reference: str) -> str:
 
 
 def _latency_table(rows: list[dict]) -> str:
+    """Compone la tabella delle latenze per configurazione.
+
+    Args:
+        rows: Righe di generazione con i tempi misurati.
+
+    Returns:
+        La tabella Markdown con mediana e 95° percentile di ogni tempo.
+    """
     def cell(config: str, metric: str) -> str:
+        """Formatta mediana e 95° percentile di un tempo.
+
+        Args:
+            config: Configurazione da considerare.
+            metric: Nome del tempo misurato.
+
+        Returns:
+            Il testo `p50 / p95`, `n/d` senza valori.
+        """
         stat = _stat(_values(rows, config, metric))
         return "n/d" if stat["n"] == 0 else f"{stat['p50']:.2f} / {stat['p95']:.2f}"
 
@@ -207,8 +383,17 @@ def _latency_table(rows: list[dict]) -> str:
 
 # --- Dove si perdono i simboli attesi ---
 
-def _gold(rows: list[dict], config: str, hop: Optional[int] = None) -> list[str]:
-    """Stato di ogni simbolo atteso di una configurazione (vedi `metrics.gold_status`)."""
+def _gold(rows: list[dict], config: str, hop: int | None = None) -> list[str]:
+    """Raccoglie lo stato dei simboli attesi di una configurazione (vedi `metrics.gold_status`).
+
+    Args:
+        rows: Righe di retrieval.
+        config: Configurazione da considerare.
+        hop: Limita ai simboli a quella distanza; None per tutti.
+
+    Returns:
+        Lo stato di ogni simbolo atteso.
+    """
     return [
         item["status"]
         for row in rows
@@ -219,46 +404,107 @@ def _gold(rows: list[dict], config: str, hop: Optional[int] = None) -> list[str]
 
 
 def _funnel_table(rows: list[dict]) -> str:
+    """Compone la tabella che mostra dove finiscono i simboli attesi.
+
+    Args:
+        rows: Righe di retrieval.
+
+    Returns:
+        La tabella Markdown con le quote per stadio, per budget e mai trovati; vuota senza gold.
+    """
     table = []
     for config in _configs(rows):
         statuses = _gold(rows, config)
         if statuses:
-            cells = [share(statuses, ORIGINS), *(share(statuses, [o]) for o in ORIGINS), *(share(statuses, [s]) for s in LOST)]
+            cells = [
+                share(statuses, ORIGINS),
+                *(share(statuses, [o]) for o in ORIGINS),
+                *(share(statuses, [s]) for s in LOST),
+            ]
             table.append([config, str(len(statuses))] + [f"{value:.0%}" for value in cells])
     headers = ["Config", "Simboli attesi", "Nel contesto"] + [f"di cui da {ORIGIN_LABELS[o]}" for o in ORIGINS]
     return _table(headers + ["Esclusi dal budget", "Mai trovati"], table) if table else ""
 
 
 def _symbol_label(item: dict) -> str:
+    """Formatta un simbolo atteso per le tabelle del report.
+
+    Args:
+        item: Stato di un simbolo atteso, con chiave `file::simbolo` e hop.
+
+    Returns:
+        Il nome del simbolo con il file e, per i simboli a distanza 2, l'hop.
+    """
     filename, _, symbol = item["symbol"].partition("::")
     return f"`{symbol}` ({Path(filename).name}{', hop 2' if item['hop'] == 2 else ''})"
 
 
 def _missing_table(rows: list[dict], reference: str) -> str:
-    """Le domande della configurazione di riferimento con simboli attesi fuori dal contesto."""
+    """Elenca le domande della configurazione di riferimento con simboli attesi fuori dal contesto.
+
+    Args:
+        rows: Righe di retrieval.
+        reference: Configurazione di riferimento.
+
+    Returns:
+        La tabella Markdown, a partire dal recall più basso; vuota se non manca alcun simbolo.
+    """
     lost = [r for r in rows if r["config"] == reference and any(g["status"] in LOST for g in r.get("gold", []))]
     lost.sort(key=lambda row: (row["metrics"]["symbol_context_recall"], row["id"]))
 
     def names(row: dict, status: str) -> str:
+        """Elenca i simboli attesi di una domanda che hanno un certo stato.
+
+        Args:
+            row: Riga di retrieval della domanda.
+            status: Stato cercato: `budget` o `missing`.
+
+        Returns:
+            I simboli separati da virgole, `-` se non ce ne sono.
+        """
         return ", ".join(_symbol_label(g) for g in row["gold"] if g["status"] == status) or "-"
 
     table = [
-        [row["id"], row["category"], f"{row['metrics']['symbol_context_recall']:.2f}", names(row, "budget"), names(row, "missing")]
+        [
+            row["id"],
+            row["category"],
+            f"{row['metrics']['symbol_context_recall']:.2f}",
+            names(row, "budget"),
+            names(row, "missing"),
+        ]
         for row in lost[:MAX_ROWS]
     ]
     more = f"\n\n... e altre {len(lost) - MAX_ROWS} domande (vedi `retrieval.jsonl`)." if len(lost) > MAX_ROWS else ""
-    return _table(["Domanda", "Categoria", "Ctx recall", "Esclusi dal budget", "Mai trovati"], table) + more if table else ""
+    headers = ["Domanda", "Categoria", "Ctx recall", "Esclusi dal budget", "Mai trovati"]
+    return _table(headers, table) + more if table else ""
 
 
 # --- Retrieval o modello? ---
 
 def _with_context(generation: list[dict]) -> list[dict]:
-    """Risposte date con un contesto (la baseline senza contesto non dice nulla sul retrieval)."""
+    """Seleziona le risposte date con un contesto.
+
+    La baseline senza contesto non dice nulla sul retrieval.
+
+    Args:
+        generation: Righe di generazione.
+
+    Returns:
+        Le righe che hanno almeno una fonte.
+    """
     return [row for row in generation if row.get("sources")]
 
 
 def _attribution(generation: list[dict], config: str) -> tuple[list[float], list[float]]:
-    """Correttezza delle domande con contesto completo e incompleto (tutti i simboli attesi o no)."""
+    """Separa la correttezza delle domande con contesto completo da quelle con contesto incompleto.
+
+    Args:
+        generation: Righe di generazione.
+        config: Configurazione da considerare.
+
+    Returns:
+        La correttezza delle domande con tutti i simboli attesi nel contesto e quella delle altre.
+    """
     rows = [
         row["metrics"]
         for row in generation
@@ -270,29 +516,56 @@ def _attribution(generation: list[dict], config: str) -> tuple[list[float], list
 
 
 def _attribution_table(generation: list[dict]) -> str:
+    """Compone la tabella della correttezza con contesto completo e incompleto.
+
+    Args:
+        generation: Righe di generazione.
+
+    Returns:
+        La tabella Markdown, con una riga per configurazione; vuota senza risposte giudicate.
+    """
     table = []
     for config in _configs(_with_context(generation)):
         complete, partial = _attribution(generation, config)
         if complete or partial:
-            table.append([config, str(len(complete)), _cell(complete, "{:.2f}"), str(len(partial)), _cell(partial, "{:.2f}")])
+            table.append(
+                [config, str(len(complete)), _cell(complete, "{:.2f}"), str(len(partial)), _cell(partial, "{:.2f}")]
+            )
     headers = ["Config", "Contesto completo: domande", "correttezza", "Contesto incompleto: domande", "correttezza"]
     return _table(headers, table) if table else ""
 
 
 def _wrong_facts(generation: list[dict]) -> list[dict]:
-    """Fatti chiave sbagliati e configurazioni che li sbagliano (`°` = contesto incompleto)."""
+    """Raccoglie i fatti chiave sbagliati e le configurazioni che li sbagliano.
+
+    Args:
+        generation: Righe di generazione con i verdetti.
+
+    Returns:
+        I fatti sbagliati, dai più diffusi; `°` segna le configurazioni con contesto incompleto.
+    """
     wrong: dict[tuple[str, int], dict] = {}
     for row in _with_context(generation):
         recall = row["metrics"].get("symbol_context_recall")
         incomplete = recall is not None and recall < 1.0
         for index, correct in enumerate(row.get("fact_verdicts", [])):
             if not correct:
-                entry = wrong.setdefault((row["id"], index), {"id": row["id"], "fact": row["key_facts"][index], "configs": []})
+                entry = wrong.setdefault(
+                    (row["id"], index), {"id": row["id"], "fact": row["key_facts"][index], "configs": []}
+                )
                 entry["configs"].append(row["config"] + ("°" if incomplete else ""))
     return sorted(wrong.values(), key=lambda entry: (-len(entry["configs"]), entry["id"]))
 
 
 def _wrong_facts_table(generation: list[dict]) -> str:
+    """Compone la tabella dei fatti chiave sbagliati.
+
+    Args:
+        generation: Righe di generazione con i verdetti.
+
+    Returns:
+        La tabella Markdown, limitata a MAX_ROWS righe; vuota se nessun fatto è sbagliato.
+    """
     wrong = _wrong_facts(generation)
     table = [[entry["id"], entry["fact"], ", ".join(entry["configs"])] for entry in wrong[:MAX_ROWS]]
     more = f"\n\n... e altri {len(wrong) - MAX_ROWS} fatti (vedi `generation.jsonl`)." if len(wrong) > MAX_ROWS else ""
@@ -302,7 +575,15 @@ def _wrong_facts_table(generation: list[dict]) -> str:
 # --- Diagnosi ---
 
 def _diagnosis(retrieval: list[dict], generation: list[dict]) -> list[str]:
-    """Poche frasi ricavate dai dati: dove intervenire prima di leggere le tabelle."""
+    """Ricava dai dati poche frasi che dicono dove intervenire, prima di leggere le tabelle.
+
+    Args:
+        retrieval: Righe di retrieval con metriche.
+        generation: Righe di generazione.
+
+    Returns:
+        I punti della diagnosi, in Markdown.
+    """
     points = []
     reference = _reference(retrieval)
     statuses = _gold(retrieval, reference)
@@ -311,9 +592,15 @@ def _diagnosis(retrieval: list[dict], generation: list[dict]) -> list[str]:
         if max(cut, missing) < 0.05:
             hint = "Il retrieval porta nel contesto quasi tutto ciò che serve."
         elif cut > missing:
-            hint = "Il limite principale è il budget: i chunk giusti vengono trovati ma non entrano (ordinamento, dimensione dei chunk, budget)."
+            hint = (
+                "Il limite principale è il budget: i chunk giusti vengono trovati ma non entrano "
+                "(ordinamento, dimensione dei chunk, budget)."
+            )
         else:
-            hint = "Il limite principale è la ricerca: i chunk giusti non diventano candidati (ricerca, simboli nominati, grafo)."
+            hint = (
+                "Il limite principale è la ricerca: i chunk giusti non diventano candidati "
+                "(ricerca, simboli nominati, grafo)."
+            )
         points.append(
             f"**Simboli attesi** (`{reference}`): {share(statuses, ORIGINS):.0%} nel contesto, "
             f"{cut:.0%} trovati ma esclusi dal budget, {missing:.0%} mai trovati. {hint}"
@@ -339,11 +626,14 @@ def _diagnosis(retrieval: list[dict], generation: list[dict]) -> list[str]:
         points.append("**Stadi con effetto misurabile**: " + "; ".join(useful) + ".")
     if neutral:
         points.append(
-            "**Stadi senza effetto misurabile**: " + ", ".join(neutral)
-            + ". Sono i candidati da rivedere o togliere; differenze piccole non si distinguono con questo numero di domande."
+            "**Stadi senza effetto misurabile**: " + ", ".join(neutral) + ". Sono i candidati da rivedere o togliere; "
+            "differenze piccole non si distinguono con questo numero di domande."
         )
     for baseline in [c for c in _configs(retrieval) if c.startswith("naive") and c != reference]:
-        cells = [f"{label} {_delta_cell(_delta(retrieval, reference, baseline, metric))}" for metric, label in DELTA_METRICS.items()]
+        cells = [
+            f"{label} {_delta_cell(_delta(retrieval, reference, baseline, metric))}"
+            for metric, label in DELTA_METRICS.items()
+        ]
         points.append(f"**`{reference}` rispetto a `{baseline}`**: " + ", ".join(cells) + ".")
 
     answered = _with_context(generation)
@@ -357,13 +647,13 @@ def _diagnosis(retrieval: list[dict], generation: list[dict]) -> list[str]:
             for correct in row.get("fact_verdicts", [])
             if not correct
         ]
-        text = (
+        points.append(
             f"**Retrieval o modello?** (`{reference}`) Con tutti i simboli attesi nel contesto la correttezza è "
-            f"{_cell(complete, '{:.2f}')} ({len(complete)} domande); con contesto incompleto {_cell(partial, '{:.2f}')} "
-            f"({len(partial)}). Fatti sbagliati in queste domande: {len(wrong)}, di cui {sum(wrong)} con contesto incompleto "
-            f"(da cercare nel retrieval) e {len(wrong) - sum(wrong)} con contesto completo (modello o prompt)."
+            f"{_cell(complete, '{:.2f}')} ({len(complete)} domande); con contesto incompleto "
+            f"{_cell(partial, '{:.2f}')} ({len(partial)}). Fatti sbagliati in queste domande: {len(wrong)}, "
+            f"di cui {sum(wrong)} con contesto incompleto (da cercare nel retrieval) e {len(wrong) - sum(wrong)} "
+            "con contesto completo (modello o prompt)."
         )
-        points.append(text)
     wrong_facts, configs = _wrong_facts(generation), _configs(answered)
     everywhere = sum(len(entry["configs"]) == len(configs) for entry in wrong_facts)
     if wrong_facts and len(configs) > 1:
@@ -377,6 +667,15 @@ def _diagnosis(retrieval: list[dict], generation: list[dict]) -> list[str]:
 # --- Summary ---
 
 def _summary(stage: str, rows: list[dict]) -> list[dict]:
+    """Calcola le statistiche di ogni metrica per configurazione e categoria.
+
+    Args:
+        stage: Nome dello stadio: `retrieval` o `generation`.
+        rows: Righe dello stadio.
+
+    Returns:
+        Una voce per stadio, configurazione, categoria (`all` per tutte) e metrica.
+    """
     entries = []
     metrics = sorted({name for row in rows for name in row.get("metrics", {})})
     for category in ["all", *sorted({row["category"] for row in rows})]:
@@ -389,6 +688,12 @@ def _summary(stage: str, rows: list[dict]) -> list[dict]:
 
 
 def _write_summary(run_dir: Path, entries: list[dict]) -> None:
+    """Scrive il summary del run in `summary.json` e `summary.csv`.
+
+    Args:
+        run_dir: Cartella del run.
+        entries: Voci calcolate da `_summary`.
+    """
     (run_dir / "summary.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
     with (run_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(entries[0]) if entries else ["stage"])
@@ -399,22 +704,38 @@ def _write_summary(run_dir: Path, entries: list[dict]) -> None:
 # --- Report e confronto ---
 
 def _header(manifest: dict, judged: int) -> str:
+    """Compone l'intestazione del report con i parametri del run.
+
+    Args:
+        manifest: Manifest del run.
+        judged: Numero di risposte giudicate.
+
+    Returns:
+        L'elenco puntato in Markdown.
+    """
     dataset, job, params = manifest["dataset"], manifest.get("indexing_job") or {}, manifest["rag_params"]
     spec = manifest["spec"]
     return "\n".join([
-        f"- Dataset: `{dataset['name']}` ({dataset['repo_url']} @ `{dataset['ref']}`, commit `{dataset['commit'][:10]}`)",
+        f"- Dataset: `{dataset['name']}` ({dataset['repo_url']} @ `{dataset['ref']}`,"
+        f" commit `{dataset['commit'][:10]}`)",
         f"- Campione: {dataset.get('sampled_questions', 'n/d')} domande"
         f" (per categoria: {spec.get('per_category') or 'tutte'}, seed {spec.get('seed', 0)});"
         f" planner {'acceso' if spec.get('planner', True) else 'spento'}",
         f"- Parametri: modello `{params.get('LLM_MODEL')}`, K={params.get('K')},"
         f" soglia={params.get('SEMANTIC_RELEVANCE_RATIO')}, finestra={params.get('LLM_CONTEXT_TOKENS')} token",
-        f"- Indicizzazione: {job.get('indexing_seconds', 'n/d')} s, {manifest['esperto_health'].get('points_count', 'n/d')} punti",
+        f"- Indicizzazione: {job.get('indexing_seconds', 'n/d')} s,"
+        f" {manifest['esperto_health'].get('points_count', 'n/d')} punti",
         f"- Risposte giudicate: {judged} (`to_judge.jsonl` -> `POST /runs/{{id}}/judgments`)",
         "- Celle: media [IC 95% bootstrap sulle domande]; `*` = differenza appaiata con IC che esclude 0.",
     ])
 
 
 def write_report(run_dir: Path) -> None:
+    """Scrive `report.md` e i file di summary di un run.
+
+    Args:
+        run_dir: Cartella del run.
+    """
     manifest, retrieval_rows, generation = load_run(run_dir)
     retrieval = [row for row in retrieval_rows if "metrics" in row]
     judged = int(sum(row.get("metrics", {}).get("judged", 0) for row in generation))
@@ -422,6 +743,15 @@ def write_report(run_dir: Path) -> None:
     _write_summary(run_dir, _summary("retrieval", retrieval) + _summary("generation", generation))
 
     def section(title: str, body: str) -> list[str]:
+        """Prepara una sezione del report, omettendola se è vuota.
+
+        Args:
+            title: Titolo della sezione.
+            body: Testo della sezione.
+
+        Returns:
+            Titolo e testo, oppure nessun elemento se il testo è vuoto.
+        """
         return [title, body] if body else []
 
     sections = [f"# Benchmark {manifest['run_id']}", _header(manifest, judged)]
@@ -431,15 +761,20 @@ def write_report(run_dir: Path) -> None:
     if retrieval:
         failed = sum(bool(row.get("error")) for row in retrieval_rows)
         sections += ["## Retrieval"]
-        sections += [f"**Attenzione**: {failed} richieste fallite su {len(retrieval_rows)}, escluse dalle medie."] if failed else []
+        if failed:
+            sections += [f"**Attenzione**: {failed} richieste fallite su {len(retrieval_rows)}, escluse dalle medie."]
         sections += [_metric_table(retrieval, RETRIEVAL_COLUMNS)]
-        sections += section(
-            "### Dove finiscono i simboli attesi",
-            _funnel_table(retrieval) and "Quote sul totale dei simboli attesi (il ctx recall è invece la media per domanda). "
-            "\"Esclusi dal budget\": trovati dalla ricerca ma rimasti fuori dal contesto.\n\n" + _funnel_table(retrieval),
+        funnel = _funnel_table(retrieval)
+        funnel_note = (
+            "Quote sul totale dei simboli attesi (il ctx recall è invece la media per domanda). "
+            '"Esclusi dal budget": trovati dalla ricerca ma rimasti fuori dal contesto.\n\n'
         )
+        sections += section("### Dove finiscono i simboli attesi", funnel and funnel_note + funnel)
         if len(_configs(retrieval)) > 1:
-            sections += section(f"### Effetto di ogni configurazione (differenza rispetto a `{reference}`)", _delta_table(retrieval, reference))
+            sections += section(
+                f"### Effetto di ogni configurazione (differenza rispetto a `{reference}`)",
+                _delta_table(retrieval, reference),
+            )
         sections += section("### Ctx recall per categoria", _category_table(retrieval, "symbol_context_recall"))
         sections += section(f"### Domande con simboli mancanti (`{reference}`)", _missing_table(retrieval, reference))
     if generation:
@@ -447,14 +782,24 @@ def write_report(run_dir: Path) -> None:
         if judged:
             sections += section("### Correttezza per categoria", _category_table(generation, "correctness"))
             sections += section("### Retrieval o modello?", _attribution_table(generation))
-            sections += section("### Fatti sbagliati (`°` = contesto incompleto per quella domanda)", _wrong_facts_table(generation))
+            sections += section(
+                "### Fatti sbagliati (`°` = contesto incompleto per quella domanda)", _wrong_facts_table(generation)
+            )
         if any("total_s" in row.get("metrics", {}) for row in generation):
             sections += ["### Latenza", _latency_table([r for r in generation if "total_s" in r.get("metrics", {})])]
     (run_dir / "report.md").write_text("\n\n".join(sections) + "\n", encoding="utf-8")
 
 
 def compare_runs(run_dir: Path, other_dir: Path) -> str:
-    """Differenze appaiate tra due run, sulle configurazioni e sulle domande che hanno in comune."""
+    """Confronta due run sulle configurazioni e sulle domande che hanno in comune.
+
+    Args:
+        run_dir: Cartella del run di cui misurare le differenze.
+        other_dir: Cartella del run di riferimento.
+
+    Returns:
+        Il testo Markdown con la tabella delle differenze appaiate (questo run meno l'altro).
+    """
     stages = dict(zip(("retrieval", "generation"), load_run(run_dir)[1:]))
     other_stages = dict(zip(("retrieval", "generation"), load_run(other_dir)[1:]))
     table = []
@@ -472,4 +817,5 @@ def compare_runs(run_dir: Path, other_dir: Path) -> str:
     if not table:
         return f"{title}\n\nNessuna configurazione e domanda in comune tra i due run.\n"
     note = "Differenza = questo run - l'altro, sulle stesse domande; `*` = IC 95% che esclude 0."
-    return f"{title}\n\n{note}\n\n" + _table(["Metrica", "Config", other_dir.name, run_dir.name, "Differenza", "Domande"], table) + "\n"
+    headers = ["Metrica", "Config", other_dir.name, run_dir.name, "Differenza", "Domande"]
+    return f"{title}\n\n{note}\n\n" + _table(headers, table) + "\n"
