@@ -9,9 +9,8 @@ from qdrant_client.http.models import HasIdCondition
 from src.core.rag import retrieval
 from src.core.services.qdrant import _point_id
 from src.core.shared.options import RetrievalOptions
-from src.core.shared.vectors import QueryVectors
 
-# chunk_id -> (file, similarita' densa); l'ordine e' quello della fusione dense+sparse.
+# chunk_id -> (file, similarita' con la domanda).
 CHUNKS = {"low": ("a.py", 0.2), "top": ("a.py", 0.9), "mid": ("b.py", 0.6), "noise": ("c.py", 0.1)}
 
 
@@ -29,17 +28,16 @@ class FakeClient:
             or (_point_id(chunk_id) in condition.has_id if isinstance(condition, HasIdCondition)
                 else filename == condition.match.value)
         ]
-        fusion = "prefetch" in kwargs
         points = [
             SimpleNamespace(
                 id=_point_id(chunk_id),
-                score=1.0 / rank if fusion else CHUNKS[chunk_id][1],
+                score=CHUNKS[chunk_id][1],
                 payload={
                     "page_content": f"code {chunk_id}",
                     "metadata": {"chunk_id": chunk_id, "filename": CHUNKS[chunk_id][0], "symbol_name": chunk_id},
                 },
             )
-            for rank, chunk_id in enumerate(chunk_ids, start=1)
+            for chunk_id in sorted(chunk_ids, key=lambda chunk_id: -CHUNKS[chunk_id][1])
         ]
         return SimpleNamespace(points=points[: kwargs["limit"]])
 
@@ -57,7 +55,7 @@ def encoded(monkeypatch):
 
     def encode(texts):
         calls.append(list(texts))
-        return [QueryVectors(dense=[0.1], sparse=None) for _ in texts]
+        return [[0.1] for _ in texts]
 
     monkeypatch.setattr(retrieval, "encode_queries", encode)
     return calls
@@ -65,7 +63,7 @@ def encoded(monkeypatch):
 
 def _retrieve(options=RetrievalOptions(), questions=("sotto-domanda",), related=None, named=(), seeds=None):
     client = FakeClient()
-    retriever = retrieval.HybridRetriever(client)
+    retriever = retrieval.Retriever(client)
 
     def related_chunks(chunk_ids, limit, top_chunk_ids):
         if seeds is not None:
@@ -77,16 +75,16 @@ def _retrieve(options=RetrievalOptions(), questions=("sotto-domanda",), related=
     return client, sources
 
 
-def test_sources_are_deduplicated_and_ranked_by_a_final_fusion(encoded):
+def test_sources_are_deduplicated_and_ranked_on_the_original_question(encoded):
     client, sources = _retrieve()
     # "low" (0.2) e "noise" (0.1) sono sotto la soglia 0.3 * 0.9 della ricerca; "low" rientra
-    # come chunk dello stesso file di "top". Senza una classifica comune il primo chunk di ogni
-    # ricerca avrebbe lo score massimo: l'ultima chiamata riordina tutti i candidati sulla domanda.
+    # come chunk dello stesso file di "top". L'ultima chiamata valuta tutti i candidati (trovati
+    # anche dalla sotto-domanda) sulla domanda originale.
     final = client.calls[-1]
     assert len(final["query_filter"].must[0].has_id) == 3 and final["limit"] == 3
-    assert all(prefetch.limit == 3 for prefetch in final["prefetch"])
-    assert [source["chunk_id"] for source in sources] == ["low", "top", "mid"]
-    assert [source["score"] for source in sources] == [1.0, 0.5, 1 / 3]
+    assert all(call["using"] == "dense" for call in client.calls)
+    assert [source["chunk_id"] for source in sources] == ["top", "mid", "low"]
+    assert [source["score"] for source in sources] == [0.9, 0.6, 0.2]
 
 
 def test_relevance_threshold_applies_only_to_the_question_search(encoded):
@@ -103,7 +101,7 @@ def test_all_questions_are_encoded_once_with_the_original_first(encoded):
 def test_context_budget_limits_the_sources(encoded, monkeypatch):
     monkeypatch.setattr(retrieval, "RAG_CONTEXT_MAX_SOURCES", 1)
     _, sources = _retrieve()
-    assert [source["chunk_id"] for source in sources] == ["low"]
+    assert [source["chunk_id"] for source in sources] == ["top"]
 
 
 def test_graph_neighbors_skip_the_rerank_and_keep_reserved_slots(encoded, monkeypatch):
@@ -112,7 +110,7 @@ def test_graph_neighbors_skip_the_rerank_and_keep_reserved_slots(encoded, monkey
     # "noise" e' sotto la soglia di rilevanza, "top" e' gia' un risultato diretto.
     _, sources = _retrieve(related={"noise": "calls", "top": "called_by:calls"})
     assert [(source["chunk_id"], source["graph_relation"], source["score"]) for source in sources] == [
-        ("low", None, 1.0),
+        ("top", None, 0.9),
         ("noise", "calls", None),
     ]
 
@@ -135,13 +133,13 @@ def test_k_can_be_overridden_per_request(encoded):
 def test_symbols_named_in_the_question_come_first(encoded):
     # "noise" e' sotto la soglia della ricerca: entra perche' la domanda lo nomina.
     _, sources = _retrieve(named=["noise"])
-    assert [source["chunk_id"] for source in sources] == ["noise", "low", "top", "mid"]
-    assert sources[0]["score"] == 0.25
+    assert [source["chunk_id"] for source in sources] == ["noise", "top", "mid", "low"]
+    assert sources[0]["score"] == 0.1
 
 
 def test_symbol_lookup_can_be_disabled(encoded):
     _, sources = _retrieve(RetrievalOptions(use_symbol_lookup=False), named=["noise"])
-    assert [source["chunk_id"] for source in sources] == ["low", "top", "mid"]
+    assert [source["chunk_id"] for source in sources] == ["top", "mid", "low"]
 
 
 def test_graph_starts_from_search_results_and_named_symbols_only(encoded):
@@ -174,7 +172,7 @@ def test_sources_carry_their_origin_and_budget_cuts_are_reported(encoded, monkey
 
     monkeypatch.setattr(retrieval, "RAG_CONTEXT_MAX_SOURCES", 1)
     client, sources = _retrieve()
-    assert [source["chunk_id"] for source in sources] == ["low"]
+    assert [source["chunk_id"] for source in sources] == ["top"]
     # I candidati tagliati dal budget sono riportati senza testo, con la loro origine.
-    assert {item["chunk_id"]: item["origin"] for item in client.dropped} == {"top": "search", "mid": "search"}
+    assert {item["chunk_id"]: item["origin"] for item in client.dropped} == {"mid": "search", "low": "same_file"}
     assert all("content" not in item for item in client.dropped)

@@ -1,4 +1,4 @@
-"""Orchestration for semantic indexing into the hybrid Qdrant collection."""
+"""Orchestration for semantic indexing into the Qdrant collection."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from ..services.embedding_cache import EmbeddingCache
 from ..services.index_state import is_current, save, source_fingerprint
 from ..services.qdrant import (
     activate_collection,
-    create_hybrid_collection,
+    create_collection,
     has_active_collection,
     upsert_encoded_documents,
     wait_for_qdrant,
@@ -54,7 +54,7 @@ def _add_relation_headers(documents: list[Document], relations: dict[str, dict[s
 
 
 def build_index() -> None:
-    """Build or reuse the persistent hybrid index for the configured codebase."""
+    """Build or reuse the persistent index for the configured codebase."""
     start_time = time.time()
     client = wait_for_qdrant()
     source_files = iter_source_files()
@@ -69,7 +69,7 @@ def build_index() -> None:
     # Il nuovo indice nasce in una collection a parte: quello attivo resta servito
     # (con il suo symbol graph e il suo stato) finche' la costruzione non e' completa.
     collection = f"{QDRANT_COLLECTION}_{int(start_time)}"
-    create_hybrid_collection(client, collection)
+    create_collection(client, collection)
     model = load_indexing_model()
     graph = build_symbol_graph(source_files)
     documents = _chunk_sources(source_files)
@@ -77,7 +77,7 @@ def build_index() -> None:
     # Batch di chunk di lunghezza simile: ogni batch e' allungato fino al suo testo piu' lungo.
     documents.sort(key=lambda document: len(document.page_content))
     cache = EmbeddingCache()
-    logger.info("Avvio indicizzazione ibrida di %d chunk semantici.", len(documents))
+    logger.info("Avvio indicizzazione di %d chunk semantici.", len(documents))
 
     for start in range(0, len(documents), BATCH_SIZE):
         batch = documents[start : start + BATCH_SIZE]

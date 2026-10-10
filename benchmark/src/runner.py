@@ -32,10 +32,7 @@ from .metrics import gold_status, retrieval_metrics
 
 logger = logging.getLogger("Benchmark")
 
-_NAIVE = {
-    "use_sparse": False, "use_same_file": False,
-    "use_symbol_graph": False, "use_symbol_lookup": False, "use_repo_map": False,
-}
+_NAIVE = {"use_same_file": False, "use_symbol_graph": False, "use_symbol_lookup": False, "use_repo_map": False}
 
 # nome -> (use_planner, opzioni di retrieval da disattivare). Ogni ablation differisce da `full` per un solo elemento.
 CONFIGS: dict[str, tuple[bool, dict]] = {
@@ -44,8 +41,6 @@ CONFIGS: dict[str, tuple[bool, dict]] = {
     "no_symbol_graph": (True, {"use_symbol_graph": False}),
     "no_same_file": (True, {"use_same_file": False}),
     "no_symbol_lookup": (True, {"use_symbol_lookup": False}),
-    "dense_only": (True, {"use_sparse": False}),
-    "sparse_only": (True, {"use_dense": False}),
     "no_repo_map": (True, {"use_repo_map": False}),  # la mappa guida il planner e apre il prompt
     "naive": (False, _NAIVE),
     # Stessa ricerca di `naive`, ma con K al massimo: e' il budget di contesto a tagliare, come in

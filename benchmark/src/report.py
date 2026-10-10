@@ -41,7 +41,7 @@ ORIGIN_LABELS = {"search": "ricerca", "symbol": "simboli nominati", "same_file":
 # Configurazione di ablation -> stadio che spegne: la diagnosi dice quali stadi contano.
 STAGE_OF = {
     "no_planner": "planner", "no_symbol_graph": "grafo", "no_same_file": "stesso file",
-    "no_symbol_lookup": "simboli nominati", "dense_only": "ricerca sparsa", "sparse_only": "ricerca densa",
+    "no_symbol_lookup": "simboli nominati",
     "no_repo_map": "mappa nel planner",
 }
 MAX_ROWS = 20

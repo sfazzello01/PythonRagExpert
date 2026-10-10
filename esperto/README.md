@@ -1,8 +1,8 @@
 # Esperto — RAG per codebase Python
 
-Microservizio di question answering su codebase: indicizzazione ibrida
-(dense + sparse + ColBERT con BGE-M3) su Qdrant, generazione in streaming
-via Ollama, ingestion di archivi ZIP.
+Microservizio di question answering su codebase: indicizzazione dei vettori
+densi di BGE-M3 su Qdrant, generazione in streaming via Ollama, ingestion di
+archivi ZIP.
 
 ## Architettura
 
@@ -11,13 +11,13 @@ via Ollama, ingestion di archivi ZIP.
 | `src/api.py` | API pubblica: `/ask` (streaming NDJSON), `/health` |
 | `src/ingestion/` | Servizio indexer: upload ZIP, validazione, job di indicizzazione in background |
 | `src/core/indexing/` | Discovery sorgenti, chunking AST Python, symbol graph, pipeline di upsert |
-| `src/core/rag/` | Planner (sotto-domande), retrieval ibrido, prompt, chain di streaming |
+| `src/core/rag/` | Planner (sotto-domande), retrieval, prompt, chain di streaming |
 | `src/core/services/` | BGE-M3 embeddings, client Qdrant, stato indice, symbol graph |
-| `src/core/shared/` | Opzioni di retrieval, utility testo/vettori |
+| `src/core/shared/` | Opzioni di retrieval, utility di testo |
 
-Pipeline di retrieval: planner (sotto-domande) → hybrid search (dense+sparse prefetch,
-rerank ColBERT MaxSim) → dedup per `chunk_id` → espansione via symbol graph
-→ budget di contesto condiviso (max sorgenti / max caratteri).
+Pipeline di retrieval: planner (sotto-domande) → ricerca densa e simboli nominati
+→ chunk dello stesso file → espansione via symbol graph → rerank sulla domanda
+originale → budget di contesto (max sorgenti / max caratteri).
 
 ## Test
 

@@ -21,7 +21,6 @@ _DEFAULT_ENV = {
     "QDRANT_PORT": "6333",
     "QDRANT_COLLECTION": "test_collection",
     "K": "8",
-    "PREFETCH_LIMIT": "20",
     "SEMANTIC_RELEVANCE_RATIO": "0.3",
     "EMBEDDING_MAX_LENGTH": "1024",
     "MAX_MESSAGE_LENGTH": "5000",

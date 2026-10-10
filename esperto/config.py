@@ -19,7 +19,6 @@ class AppConfig(BaseModel):
     qdrant_port: int
     qdrant_collection: str
     k: int = Field(ge=1, le=50)
-    prefetch_limit: int = Field(ge=1, le=100)
     semantic_relevance_ratio: float = Field(ge=0.0, le=1.0)
     embedding_max_length: int = Field(ge=128, le=8192)
     max_message_length: int = Field(ge=100, le=50000)
@@ -75,7 +74,6 @@ QDRANT_HOST = config.qdrant_host
 QDRANT_PORT = config.qdrant_port
 QDRANT_COLLECTION = config.qdrant_collection
 K = config.k
-PREFETCH_LIMIT = config.prefetch_limit
 SEMANTIC_RELEVANCE_RATIO = config.semantic_relevance_ratio
 EMBEDDING_MAX_LENGTH = config.embedding_max_length
 MAX_MESSAGE_LENGTH = config.max_message_length
@@ -120,4 +118,4 @@ INGESTION_WORKSPACE_DIR = config.ingestion_workspace_dir
 DENSE_DIMENSION = 1024
 SYMBOL_GRAPH_VERSION = 1
 # Da incrementare quando cambiano il chunking, i vettori salvati o la mappa: invalida gli indici gia' costruiti.
-CHUNKING_VERSION = 7
+CHUNKING_VERSION = 9

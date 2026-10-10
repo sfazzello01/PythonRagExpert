@@ -1,4 +1,4 @@
-"""Qdrant collection management, ingestion, and hybrid-search primitives."""
+"""Qdrant collection management, ingestion, and dense-search primitives."""
 
 from __future__ import annotations
 
@@ -18,30 +18,23 @@ from qdrant_client.http.models import (  # type: ignore
     DeleteAliasOperation,
     Distance,
     Filter,
-    Fusion,
-    FusionQuery,
     HasIdCondition,
     PointStruct,
-    Prefetch,
     QuantizationSearchParams,
     ScalarQuantization,
     ScalarQuantizationConfig,
     ScalarType,
     SearchParams,
-    SparseVectorParams,
     VectorParams,
 )
 
 from config import (
     DENSE_DIMENSION,
-    PREFETCH_LIMIT,
     QDRANT_COLLECTION,
     QDRANT_HOST,
     QDRANT_PORT,
     QDRANT_QUERY_TIMEOUT,
 )
-from ..shared.options import RetrievalOptions
-from ..shared.vectors import QueryVectors, lexical_weights_to_sparse_vector
 
 logger = logging.getLogger("EspertoQdrant")
 
@@ -128,8 +121,8 @@ def activate_collection(client: QdrantClient, collection: str) -> None:
             client.delete_collection(name)
 
 
-def create_hybrid_collection(client: QdrantClient, collection: str) -> None:
-    """Create a dense+sparse collection."""
+def create_collection(client: QdrantClient, collection: str) -> None:
+    """Create the collection of BGE-M3 dense vectors."""
     client.create_collection(
         collection_name=collection,
         vectors_config={
@@ -145,7 +138,6 @@ def create_hybrid_collection(client: QdrantClient, collection: str) -> None:
                 ),
             ),
         },
-        sparse_vectors_config={"sparse": SparseVectorParams()},
     )
 
 
@@ -158,23 +150,16 @@ def upsert_encoded_documents(
     client: QdrantClient,
     collection: str,
     documents: Sequence[Document],
-    encoded_batch: dict,
+    dense_vectors: Sequence,
 ) -> None:
-    """Upsert BGE-M3-encoded documents, falling back to individual requests if needed."""
+    """Upsert documents with their dense vectors, falling back to individual requests if needed."""
     points = [
         PointStruct(
             id=_point_id(document.metadata["chunk_id"]),
-            vector={
-                "dense": dense_vector.tolist(),
-                "sparse": lexical_weights_to_sparse_vector(lexical_weights),
-            },
+            vector={"dense": dense_vector.tolist()},
             payload={"page_content": document.page_content, "metadata": document.metadata},
         )
-        for document, dense_vector, lexical_weights in zip(
-            documents,
-            encoded_batch["dense_vecs"],
-            encoded_batch["lexical_weights"],
-        )
+        for document, dense_vector in zip(documents, dense_vectors)
     ]
     try:
         client.upsert(collection_name=collection, points=points)
@@ -186,47 +171,24 @@ def upsert_encoded_documents(
             client.upsert(collection_name=collection, points=[point])
 
 
-async def _dense_scores(client: AsyncQdrantClient, query_vectors: QueryVectors, point_ids: list) -> dict:
-    """Cosine similarity between the query and the given points (point ID -> score)."""
-    response = await asyncio.wait_for(
-        client.query_points(
-            collection_name=QDRANT_COLLECTION,
-            query=query_vectors.dense,
-            using="dense",
-            query_filter=Filter(must=[HasIdCondition(has_id=point_ids)]),
-            limit=len(point_ids),
-            with_payload=False,
-        ),
-        timeout=QDRANT_QUERY_TIMEOUT,
-    )
-    return {point.id: point.score for point in response.points}
-
-
-async def hybrid_search(
+async def dense_search(
     client: AsyncQdrantClient,
-    query_vectors: QueryVectors,
+    query_vector: list[float],
     limit: int,
     query_filter: Optional[Filter] = None,
-    options: RetrievalOptions = RetrievalOptions(),
     min_score_ratio: float = 0.0,
-    prefetch_limit: int = PREFETCH_LIMIT,
 ) -> list[Document]:
-    """Fusione dense+sparse (RRF): i primi `limit` chunk, con lo score RRF in `_score`.
+    """I primi `limit` chunk per similarita' coseno con la domanda, esposta in `_score`.
 
-    Con `min_score_ratio` si scartano i chunk la cui similarita' densa e' sotto quella quota
-    della migliore. Timeout ed errori di Qdrant si propagano: un contesto vuoto sarebbe
-    indistinguibile da "nessun risultato".
+    Con `min_score_ratio` si scartano i chunk sotto quella quota della similarita' migliore.
+    Timeout ed errori di Qdrant si propagano: un contesto vuoto sarebbe indistinguibile da
+    "nessun risultato".
     """
-    prefetch = []
-    if options.use_dense:
-        prefetch.append(Prefetch(query=query_vectors.dense, using="dense", limit=prefetch_limit, filter=query_filter))
-    if options.use_sparse:
-        prefetch.append(Prefetch(query=query_vectors.sparse, using="sparse", limit=prefetch_limit, filter=query_filter))
     response = await asyncio.wait_for(
         client.query_points(
             collection_name=QDRANT_COLLECTION,
-            prefetch=prefetch,
-            query=FusionQuery(fusion=Fusion.RRF),
+            query=query_vector,
+            using="dense",
             limit=limit,
             query_filter=query_filter,
             search_params=_QUANTIZATION_PARAMS,
@@ -234,38 +196,20 @@ async def hybrid_search(
         ),
         timeout=QDRANT_QUERY_TIMEOUT,
     )
-    points = response.points
-    if points and min_score_ratio and options.use_dense:
-        # Lo score RRF dipende solo dalla posizione: la soglia usa la similarita' densa.
-        similarity = await _dense_scores(client, query_vectors, [point.id for point in points])
-        threshold = max(similarity.values(), default=0.0) * min_score_ratio
-        points = [point for point in points if similarity.get(point.id, 0.0) >= threshold]
+    threshold = max((point.score for point in response.points), default=0.0) * min_score_ratio
     return [
         Document(
             page_content=point.payload.get("page_content", ""),
             metadata={**point.payload.get("metadata", {}), "_score": point.score},
         )
-        for point in points
+        for point in response.points
+        if point.score >= threshold
     ]
 
 
-async def rerank_chunk_ids(
-    client: AsyncQdrantClient,
-    query_vectors: QueryVectors,
-    chunk_ids: list[str],
-    options: RetrievalOptions = RetrievalOptions(),
-) -> list[Document]:
-    """Score already-known chunk IDs against one query, so that they share a comparable score.
-
-    E' la fusione dense+sparse ristretta a quegli ID.
-    """
+async def rerank_chunk_ids(client: AsyncQdrantClient, query_vector: list[float], chunk_ids: list[str]) -> list[Document]:
+    """Score already-known chunk IDs against one query, so that they share a comparable score."""
     if not chunk_ids:
         return []
-    return await hybrid_search(
-        client,
-        query_vectors,
-        limit=len(chunk_ids),
-        query_filter=Filter(must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])]),
-        options=options,
-        prefetch_limit=len(chunk_ids),
-    )
+    id_filter = Filter(must=[HasIdCondition(has_id=[_point_id(chunk_id) for chunk_id in chunk_ids])])
+    return await dense_search(client, query_vector, limit=len(chunk_ids), query_filter=id_filter)

@@ -12,18 +12,18 @@ from config import LLM_CONTEXT_TOKENS, LLM_MODEL, OLLAMA_URL, REPO_MAP_FILE, TEM
 
 from .prompts import build_prompt
 from .planner import plan_subquestions
-from .retrieval import HybridRetriever
+from .retrieval import Retriever
 from ..shared.options import RetrievalOptions
 from ..shared.text import without_imports
 
-_retriever: HybridRetriever | None = None
+_retriever: Retriever | None = None
 
 
-def _get_retriever() -> HybridRetriever:
+def _get_retriever() -> Retriever:
     """Lazy singleton: evita side-effect (client Qdrant) a import-time."""
     global _retriever
     if _retriever is None:
-        _retriever = HybridRetriever()
+        _retriever = Retriever()
     return _retriever
 
 

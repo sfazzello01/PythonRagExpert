@@ -1,4 +1,4 @@
-"""Hybrid retrieval, same-file and symbol-graph enrichment, final rerank, and context budget."""
+"""Dense retrieval, same-file and symbol-graph enrichment, final rerank, and context budget."""
 
 from __future__ import annotations
 
@@ -21,14 +21,13 @@ from config import (
 from ..services.embedding import encode_queries
 from ..services.qdrant import (
     get_async_client,
+    dense_search,
     get_documents_by_chunk_ids,
-    hybrid_search,
     rerank_chunk_ids,
 )
 from ..services.symbol_graph import SymbolGraph
 from ..shared.options import RetrievalOptions
 from ..shared.text import sanitize_text, without_imports
-from ..shared.vectors import QueryVectors
 
 SAME_FILE_LIMIT = 4
 # Risultati i cui vicini diretti nel grafo hanno la precedenza sugli altri.
@@ -87,27 +86,23 @@ def _to_source(document: Document, score: float | None, origin: str) -> dict:
     }
 
 
-class HybridRetriever:
-    """Retrieve ranked codebase context from the BGE-M3 hybrid Qdrant index."""
+class Retriever:
+    """Retrieve ranked codebase context from the BGE-M3 Qdrant index."""
 
     def __init__(self, client: AsyncQdrantClient | None = None):
         self._client = client or get_async_client()
         self._symbol_graph = SymbolGraph()
 
     async def _candidates(
-        self, question: str, query_vectors: QueryVectors, options: RetrievalOptions
+        self, question: str, query_vector: list[float], options: RetrievalOptions
     ) -> list[Document]:
-        """Candidate chunks for one question: hybrid search, named symbols, same-file chunks, graph neighbors."""
+        """Candidate chunks for one question: dense search, named symbols, same-file chunks, graph neighbors."""
         named_ids = self._symbol_graph.chunks_named(question) if options.use_symbol_lookup else []
         # La soglia di rilevanza vale solo qui: chunk dello stesso file e rerank finale
         # servono a dare contesto e a ordinare, non a selezionare.
         documents, named = await asyncio.gather(
-            hybrid_search(
-                self._client,
-                query_vectors,
-                limit=options.k or K,
-                options=options,
-                min_score_ratio=SEMANTIC_RELEVANCE_RATIO,
+            dense_search(
+                self._client, query_vector, limit=options.k or K, min_score_ratio=SEMANTIC_RELEVANCE_RATIO
             ),
             get_documents_by_chunk_ids(self._client, named_ids),
         )
@@ -120,14 +115,13 @@ class HybridRetriever:
             filenames = dict.fromkeys(document.metadata["filename"] for document in documents)
             same_file = await asyncio.gather(
                 *(
-                    hybrid_search(
+                    dense_search(
                         self._client,
-                        query_vectors,
+                        query_vector,
                         limit=SAME_FILE_LIMIT,
                         query_filter=Filter(
                             must=[FieldCondition(key="metadata.filename", match=MatchValue(value=filename))]
                         ),
-                        options=options,
                     )
                     for filename in filenames
                 )
@@ -189,7 +183,7 @@ class HybridRetriever:
 
         # Gli score di ricerche diverse (sotto-domande, stesso file) non sono confrontabili:
         # tutti i candidati vengono rivalutati sulla domanda originale.
-        reranked = await rerank_chunk_ids(self._client, query_vectors[0], list(documents), options)
+        reranked = await rerank_chunk_ids(self._client, query_vectors[0], list(documents))
         scores = {document.metadata["chunk_id"]: document.metadata["_score"] for document in reranked}
         # I simboli nominati nella domanda stanno in testa, anche se il rerank non li ha valutati.
         ranked = sorted(
