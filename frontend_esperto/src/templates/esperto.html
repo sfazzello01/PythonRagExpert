@@ -1,0 +1,533 @@
+{% extends "base.html" %}
+
+{% block title %}Codebase Expert{% endblock %}
+
+{% block head %}
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+{% endblock %}
+
+{% block content %}
+
+    <section class="section-header">
+        <h2>Codebase Expert</h2>
+        <p>Interroga il RAG sul progetto e consulta le fonti utilizzate nella risposta.</p>
+    </section>
+
+    <section class="card" id="index-card">
+
+        <h3>Indice della codebase</h3>
+
+        <div class="form-group">
+            <label for="zip-file">Dataset (.zip)</label>
+            <input type="file" id="zip-file" name="zip-file" accept=".zip,application/zip">
+        </div>
+
+        <div class="form-row">
+            <button type="button" id="upload-btn" class="btn-secondary">Carica e indicizza</button>
+        </div>
+
+        <p class="inline-message" id="index-status-text">Stato indice: in verifica...</p>
+
+    </section>
+
+    <form id="expert-form" class="card main-form" autocomplete="off">
+
+        <div class="form-group">
+
+            <label for="question">
+                Domanda
+            </label>
+
+            <textarea
+                    id="question"
+                    name="question"
+                    rows="5"
+                    placeholder="Scrivi qui la tua domanda sulla codebase"
+                    autocomplete="off"
+                    required></textarea>
+
+        </div>
+
+        <label class="toggle-control" for="use-planner">
+            <input type="checkbox" id="use-planner" name="use-planner" checked>
+            <span>Planner per sotto-domande</span>
+        </label>
+
+        <label class="toggle-control" for="use-reasoning">
+            <input type="checkbox" id="use-reasoning" name="use-reasoning">
+            <span>Ragionamento</span>
+        </label>
+
+        <div class="form-row">
+
+            <button
+                    type="submit"
+                    id="submit-btn"
+                    class="btn-primary">
+
+                Chiedi all'esperto
+
+            </button>
+
+            <button
+                    type="button"
+                    id="stop-btn"
+                    class="btn-secondary"
+                    style="display:none;">
+
+                &#9632; Interrompi
+
+            </button>
+
+        </div>
+        <p class="inline-message">Suggerimenti:</p>
+        <p class="inline-message">usa Ctrl/Cmd + Invio per inviare rapidamente.</p>
+        <p class="inline-message">il ragionamento può migliorare la risposta, ma aumenta sensibilmente la latenza</p>
+
+    </form>
+
+
+    <div class="results-grid expert-results">
+
+        <section class="card result-text">
+
+            <div class="card-heading"><h3>Risposta</h3><button type="button" id="copy-answer" class="btn-secondary">Copia</button></div>
+
+            <div id="answer" class="scroll-box markdown-content">
+                <div id="reasoning" class="reasoning-content" hidden></div>
+                <div id="answer-output">Fai una domanda alla codebase.</div>
+            </div>
+
+        </section>
+
+
+        <section class="card result-eval">
+
+            <h3>Informazioni</h3>
+
+            <div class="metrics">
+
+                <div class="metric-item">
+
+                    <span>Stato</span>
+
+                    <strong id="status">
+
+                        Pronto
+
+                    </strong>
+
+                </div>
+
+                <div class="metric-item planner-item" id="planner-item" style="display:none;">
+
+                    <span>Sotto-domande</span>
+
+                    <ol id="planner-list" class="planner-list"></ol>
+
+                </div>
+
+                <div class="metric-item" id="sources-item" style="display:none;">
+
+                    <span>Fonti</span>
+
+                    <div id="sources-list" class="sources-list"></div>
+
+                </div>
+
+            </div>
+
+        </section>
+
+    </div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+
+document.addEventListener("DOMContentLoaded", () => {
+
+    const form         = document.getElementById("expert-form");
+    const textarea     = document.getElementById("question");
+    const answer       = document.getElementById("answer");
+    const answerOutput = document.getElementById("answer-output");
+    const reasoning    = document.getElementById("reasoning");
+    const status       = document.getElementById("status");
+    const submitBtn    = document.getElementById("submit-btn");
+    const stopBtn      = document.getElementById("stop-btn");
+    const copyAnswer   = document.getElementById("copy-answer");
+    const usePlanner   = document.getElementById("use-planner");
+    const useReasoning = document.getElementById("use-reasoning");
+    const plannerItem  = document.getElementById("planner-item");
+    const plannerList  = document.getElementById("planner-list");
+    const sourcesItem  = document.getElementById("sources-item");
+    const sourcesList  = document.getElementById("sources-list");
+    const zipFile      = document.getElementById("zip-file");
+    const uploadBtn    = document.getElementById("upload-btn");
+    const indexStatus  = document.getElementById("index-status-text");
+
+    let currentController = null;
+    let statusPollTimer   = null;
+
+    /**
+     * Mostra lo stato di indexer ed esperto nella riga di stato dell'indice.
+     * @param {object|null} data Risposta di `/api/status`; null se il servizio non è raggiungibile.
+     */
+    function renderIndexStatus(data){
+        if(!data){
+            indexStatus.textContent = "Stato indice: servizio non raggiungibile.";
+            return;
+        }
+        const parts = [];
+        if(data.indexer){
+            parts.push(`indexer: ${data.indexer.status}`);
+        }
+        if(data.esperto){
+            let espertoLabel = `esperto: ${data.esperto.status}`;
+            if(data.esperto.points_count !== null && data.esperto.points_count !== undefined){
+                espertoLabel += ` (${data.esperto.points_count} chunk)`;
+            }
+            parts.push(espertoLabel);
+        }
+        indexStatus.textContent = `Stato indice: ${parts.join(" | ") || "sconosciuto"}`;
+    }
+
+    /**
+     * Legge lo stato da `/api/status` e aggiorna la riga di stato dell'indice.
+     * @returns {Promise<object|null>} Lo stato letto, oppure null se la richiesta fallisce.
+     */
+    async function refreshIndexStatus(){
+        try{
+            const response = await fetch("/api/status");
+            if(!response.ok){
+                throw new Error("status non disponibile");
+            }
+            const data = await response.json();
+            renderIndexStatus(data);
+            return data;
+        } catch(err){
+            renderIndexStatus(null);
+            return null;
+        }
+    }
+
+    /**
+     * Aggiorna lo stato ogni cinque secondi finché l'indicizzazione è in corso.
+     */
+    function startStatusPolling(){
+        if(statusPollTimer){
+            return;
+        }
+        statusPollTimer = window.setInterval(async () => {
+            const data = await refreshIndexStatus();
+            const indexing = data && data.indexer && data.indexer.status === "indexing";
+            if(!indexing && statusPollTimer){
+                window.clearInterval(statusPollTimer);
+                statusPollTimer = null;
+            }
+        }, 5000);
+    }
+
+    uploadBtn.addEventListener("click", async () => {
+        const file = zipFile.files && zipFile.files[0];
+        if(!file){
+            UI.notify("Seleziona un file .zip da caricare.", "error");
+            return;
+        }
+        if(!file.name.toLowerCase().endsWith(".zip")){
+            UI.notify("Il file deve essere un archivio .zip.", "error");
+            return;
+        }
+
+        UI.setBusy(uploadBtn, true, "Caricamento...");
+        try{
+            const formData = new FormData();
+            formData.append("file", file);
+            const response = await fetch("/api/index/upload", {
+                method: "POST",
+                body: formData
+            });
+            const data = await response.json().catch(() => ({}));
+            if(!response.ok){
+                const message = data.detail || data.error || "Upload fallito";
+                throw new Error(message);
+            }
+            UI.notify("Archivio ricevuto: indicizzazione avviata.", "success");
+            refreshIndexStatus();
+            startStatusPolling();
+        } catch(err){
+            console.error(err);
+            UI.notify(err.message || "Errore durante l'upload.", "error");
+        } finally{
+            UI.setBusy(uploadBtn, false, "Carica e indicizza");
+        }
+    });
+
+    refreshIndexStatus().then((data) => {
+        if(data && data.indexer && data.indexer.status === "indexing"){
+            startStatusPolling();
+        }
+    });
+
+    /**
+     * Mostra la risposta convertendo il Markdown in HTML sanificato; se la conversione fallisce mostra il testo.
+     * @param {string} text Risposta ricevuta finora.
+     */
+    function renderMarkdown(text){
+        try{
+            if(window.marked){
+                const html = marked.parse(text, { breaks:true, mangle:false, headerIds:false });
+                answerOutput.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : html;
+            } else {
+                answerOutput.textContent = text;
+            }
+        } catch(err){
+            console.error("Errore nel rendering della risposta", err);
+            answerOutput.textContent = text;
+        }
+    }
+
+    /**
+     * Elenca le fonti usate per la risposta, ciascuna con i metadati e il contenuto espandibile.
+     * @param {Array<object>} sources Fonti restituite dall'esperto.
+     */
+    function displaySources(sources){
+        sourcesList.innerHTML = "";
+        if(!sources || sources.length === 0){
+            sourcesItem.style.display = "none";
+            return;
+        }
+        sources.forEach((source, index) => {
+            const details = document.createElement("details");
+            details.className = "source-card";
+
+            const summary = document.createElement("summary");
+            summary.className = "source-summary";
+
+            const title = document.createElement("div");
+            title.className = "source-title";
+            const sourceName = source.filename || "Sorgente";
+            title.textContent = `${index + 1}. ${sourceName}`;
+
+            const meta = document.createElement("div");
+            meta.className = "source-meta";
+            const parts = [];
+            if(source.service){
+                parts.push(source.service);
+            }
+            if(source.symbol_name){
+                parts.push(source.symbol_name);
+            }
+            if(source.chunk_type){
+                parts.push(source.chunk_type);
+            }
+            if(source.start_line !== undefined && source.end_line !== undefined && source.start_line !== null && source.end_line !== null){
+                parts.push(`L${source.start_line}-L${source.end_line}`);
+            }
+            if(source.score !== undefined && source.score !== null){
+                parts.push(`score ${Number(source.score).toFixed(4)}`);
+            }
+            meta.textContent = parts.join(" • ");
+
+            const content = document.createElement("pre");
+            content.className = "source-content";
+            content.textContent = source.content || "";
+
+            summary.appendChild(title);
+            summary.appendChild(meta);
+            details.appendChild(summary);
+            details.appendChild(content);
+            sourcesList.appendChild(details);
+        });
+        sourcesItem.style.display = "block";
+    }
+
+    /**
+     * Elenca le sotto-domande prodotte dal planner.
+     * @param {Array<string>} subquestions Sotto-domande usate per il retrieval.
+     */
+    function displaySubquestions(subquestions){
+        plannerList.innerHTML = "";
+        if(!subquestions || subquestions.length === 0){
+            plannerItem.style.display = "none";
+            return;
+        }
+        subquestions.forEach((subquestion) => {
+            const item = document.createElement("li");
+            item.textContent = subquestion;
+            plannerList.appendChild(item);
+        });
+        plannerItem.style.display = "block";
+    }
+
+    stopBtn.addEventListener("click", () => {
+        if(currentController){
+            currentController.abort();
+        }
+    });
+
+    copyAnswer.addEventListener("click", async () => {
+        const text = answerOutput.textContent.trim();
+        if (!text) {
+            UI.notify("Non c'è ancora una risposta da copiare.", "error");
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(text);
+            UI.notify("Risposta copiata negli appunti.", "success");
+        } catch (error) {
+            UI.notify("Copia non riuscita.", "error");
+        }
+    });
+
+    form.addEventListener("submit", async (e) => {
+
+        e.preventDefault();
+
+        const question = textarea.value.trim();
+
+        if(!question){
+            answerOutput.textContent = "Scrivi una domanda prima di inviare.";
+            status.textContent = "Pronto";
+            textarea.focus();
+            return;
+        }
+
+        currentController = new AbortController();
+
+        UI.setBusy(submitBtn, true, "Sto pensando...");
+        stopBtn.style.display = "inline-block";
+        status.textContent = "Generazione";
+        answerOutput.textContent = "";
+        reasoning.textContent = "";
+        reasoning.hidden = true;
+        plannerItem.style.display = "none";
+        plannerList.innerHTML = "";
+        sourcesItem.style.display = "none";
+        sourcesList.innerHTML = "";
+
+        try{
+
+            const response = await fetch("/ask", {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({
+                    message: question,
+                    use_planner: usePlanner.checked,
+                    use_reasoning: useReasoning.checked
+                }),
+                signal:  currentController.signal
+            });
+
+            if(!response.ok){
+                const errorText = await response.text();
+                throw new Error(errorText || "Errore nella richiesta");
+            }
+
+            const reader  = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            let answerText     = "";
+            let reasoningText  = "";
+            let eventBuffer    = "";
+            let answerStarted  = false;
+            let streamError    = "";
+
+            /**
+             * Elabora un blocco dello stream: un evento JSON per riga (fonti, ragionamento, risposta).
+             * @param {string} text Testo ricevuto, che può terminare a metà di una riga.
+             */
+            function processChunk(text){
+                if(!text){
+                    return;
+                }
+
+                eventBuffer += text;
+                const lines = eventBuffer.split("\n");
+                eventBuffer = lines.pop();
+                lines.forEach(processLine);
+                answer.scrollTop = answer.scrollHeight;
+            }
+
+            /**
+             * Elabora una riga dello stream; una riga che non è JSON è un errore emesso a metà risposta.
+             * @param {string} line Riga completa ricevuta dallo stream.
+             */
+            function processLine(line){
+                if(!line.trim()){
+                    return;
+                }
+                let event;
+                try{
+                    event = JSON.parse(line);
+                } catch(err){
+                    streamError = line.replace(/^\[ERROR\]\s*/, "").trim();
+                    return;
+                }
+                if(event.type === "sources"){
+                    displaySources(event.data.sources || event.data.files);
+                    displaySubquestions(event.data.subquestions);
+                } else if(event.type === "reasoning" && !answerStarted){
+                    reasoningText += event.data;
+                    reasoning.textContent = reasoningText;
+                    reasoning.hidden = false;
+                } else if(event.type === "answer"){
+                    if(!answerStarted){
+                        answerStarted = true;
+                        reasoning.textContent = "";
+                        reasoning.hidden = true;
+                    }
+                    answerText += event.data;
+                    renderMarkdown(answerText);
+                }
+            }
+
+            while(true){
+
+                const { done, value } = await reader.read();
+                if(done){
+                    processChunk(decoder.decode());
+                    processLine(eventBuffer);  // ultima riga, se lo stream non termina con un a capo
+                    break;
+                }
+
+                processChunk(decoder.decode(value, { stream: true }));
+            }
+
+            if(streamError){
+                // La risposta parziale resta visibile: l'errore è mostrato a parte.
+                UI.notify(streamError, "error");
+                if(!answerText){
+                    answerOutput.textContent = streamError;
+                }
+                status.textContent = "Errore";
+            } else {
+                status.textContent = "Completata";
+            }
+
+        } catch(err){
+
+            if(err.name === "AbortError"){
+                status.textContent = "Interrotta";
+            } else {
+                console.error(err);
+                answerOutput.textContent = err.message;
+                status.textContent = "Errore";
+            }
+
+        } finally{
+
+            currentController = null;
+            UI.setBusy(submitBtn, false, "Chiedi all'esperto");
+            stopBtn.style.display = "none";
+
+        }
+
+    });
+
+});
+
+</script>
+{% endblock %}

@@ -1,63 +1,16 @@
 services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: dockerfile
-    ports:
-      - "8003:8003"
-    container_name: backend
-    depends_on:
-      database:
-        condition: service_healthy
-    env_file:
-      - .env
-    volumes:
-      - ./gs_data:/app/gs_data:ro
-      - ./domains.json:/app/domains.json:ro
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
-      - MYSQL_HOST=database
-  
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: dockerfile
-    ports:
-      - "8004:8004"
-    container_name: frontend
-    depends_on:
-      - backend
-      - esperto
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
-      - BACKEND_URL=http://backend:8003
-      - ESPERTO_URL=http://esperto:5000
-
-  database:
-    image: mariadb:latest
-    container_name: database
-    env_file:
-      - .env
-    ports:
-      - "3306:3306"
-    volumes:
-      - ./mariadb_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mariadb -h 127.0.0.1 -u root -p\"$MYSQL_ROOT_PASSWORD\" -e 'SELECT 1' >/dev/null"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
 
   ollama:
-    image: ollama/ollama:latest
+    profiles: ["esperto"]
+    image: ollama/ollama:0.33.3
     container_name: ollama
     ports:
       - "11434:11434"
     environment:
-    - OLLAMA_CONTEXT_LENGTH=64000
+    - OLLAMA_CONTEXT_LENGTH=${LLM_CONTEXT_TOKENS:-20000}
+    - OLLAMA_KV_CACHE_TYPE=q4_0
+    - OLLAMA_FLASH_ATTENTION=1
+    - OLLAMA_KEEP_ALIVE=-1
     volumes:
       - ./ollama_data:/root/.ollama
     #----per gpu NVIDIA---, eliminare se non si ha scheda NVIDIA#
@@ -71,24 +24,22 @@ services:
     #----per gpu NVIDIA---, eliminare se non si ha scheda NVIDIA#
     entrypoint: /bin/sh -c "ollama serve"
 
-  adminer:
-    image: adminer:latest
-    container_name: adminer
-    ports:
-      - "8080:8080"
-    depends_on:
-      - database
-    environment:
-      - ADMINER_DEFAULT_SERVER=database
-
   qdrant:
-    image: qdrant/qdrant:latest
+    profiles: ["esperto"]
+    image: qdrant/qdrant:v1.19.1
     container_name: qdrant
     ports: ["6333:6333"]
     volumes:
       - ./qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   esperto:
+    profiles: ["esperto"]
     build:
       context: ./esperto
       dockerfile: dockerfile
@@ -96,15 +47,106 @@ services:
     ports:
       - "5000:5000"
     depends_on:
-      - ollama
-      - qdrant
+      ollama:
+        condition: service_started
+      qdrant:
+        condition: service_healthy
     volumes:
-      - ./backend:/app/backend:ro
-      - ./frontend:/app/frontend:ro
-      - ./gs_data:/app/gs_data:ro
-      - ./domains.json:/app/domains.json:ro
-      - ./docker-compose.yaml:/app/docker-compose.yaml:ro
+      - ./hf_cache:/root/.cache/huggingface
+      - ./esperto_state:/app/state
+      - esperto_workspace:/app/workspace
+      - ./esperto_debug:/app/debug
+    env_file:
+      - .env
     environment:
-      - LLM_MODEL=${LLM_MODEL:-llama3.5b}
-      - OLLAMA_HOST=http://ollama:11434
-      - QDRANT_HOST=qdrant
+      - HF_HOME=/root/.cache/huggingface
+      - PROMPT_DEBUG_FILE=/app/debug/last_prompt.json
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:5000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  esperto_indexer:
+    profiles: ["esperto"]
+    build:
+      context: ./esperto
+      dockerfile: dockerfile
+      args:
+        INDEXER_GPU: ${INDEXER_GPU:-0}
+    container_name: esperto_indexer
+    command: ["uvicorn", "src.ingestion.api:app", "--host", "0.0.0.0", "--port", "5001"]
+    depends_on:
+      ollama:
+        condition: service_started
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface
+      - ./esperto_state:/app/state
+      - esperto_workspace:/app/workspace
+    env_file:
+      - .env
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - INGESTION_WORKSPACE_DIR=/app/workspace
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:5001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    # GPU NVIDIA per l'indicizzazione solo con INDEXER_GPU=1 nel .env (0 = nessuna GPU, CPU)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${INDEXER_GPU:-0}
+              capabilities: [gpu]
+
+  frontend_esperto:
+    profiles: ["esperto"]
+    build:
+      context: ./frontend_esperto
+      dockerfile: dockerfile
+    container_name: frontend_esperto
+    ports:
+      - "8005:8005"
+    depends_on:
+      esperto:
+        condition: service_started
+      esperto_indexer:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - ESPERTO_URL=http://esperto:5000
+      - ESPERTO_INDEXER_URL=http://esperto_indexer:5001
+
+  benchmark:
+    profiles: ["benchmark"]
+    build:
+      context: ./benchmark
+      dockerfile: dockerfile
+    container_name: benchmark
+    ports:
+      - "5002:5002"
+    depends_on:
+      esperto:
+        condition: service_healthy
+      esperto_indexer:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - ESPERTO_URL=http://esperto:5000
+      - ESPERTO_INDEXER_URL=http://esperto_indexer:5001
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./benchmark/datasets:/app/datasets
+      - ./benchmark_results:/app/results
+
+volumes:
+  esperto_workspace:

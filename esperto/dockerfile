@@ -7,29 +7,28 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Installiamo le dipendenze di sistema minime
-# 'build-essential' serve se alcune librerie devono compilare estensioni in C
-# 'curl' è utile per i futuri healthcheck del container
+# 'curl' serve agli healthcheck del container; tutte le dipendenze Python hanno wheel precompilate
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiamo solo il file dei requisiti per sfruttare la cache dei layer di Docker
-COPY requirements.txt .
+# 1: aggiunge PyTorch (CUDA) per indicizzare su GPU NVIDIA; usato solo dal servizio esperto_indexer
+ARG INDEXER_GPU=0
 
-# Installiamo le librerie Python
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Copiamo solo i file dei requisiti per sfruttare la cache dei layer di Docker
+COPY requirements.txt requirements-gpu.txt ./
+
+# Installiamo le librerie Python; 'triton' (dipendenza di PyTorch) serve solo a torch.compile
+RUN pip install --no-cache-dir -r requirements.txt \
+    && if [ "$INDEXER_GPU" = "1" ]; then \
+        pip install --no-cache-dir -r requirements-gpu.txt && pip uninstall -y triton; \
+    fi
 
 # Copiamo il resto del codice dell'applicazione
 COPY . .
 
-RUN chmod +x /app/entrypoint.sh
-
 # Esponiamo la porta per FastAPI
 EXPOSE 5000
 
-ENTRYPOINT ["/app/entrypoint.sh"]
 # Comando per avviare l'applicazione con Uvicorn
 CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "5000"]
