@@ -9,7 +9,7 @@ in Qdrant e nessun dato esce dalla macchina.
 
 ## Come funziona
 
-**Indicizzazione.** Ogni file Python viene diviso lungo i confini del codice, non a blocchi di
+**Indicizzazione.** Ogni file Python viene diviso lungo i confini del codice con un AST splitter, non a blocchi di
 lunghezza fissa: un chunk per funzione o classe, con gli import del modulo come contesto. Le
 classi molto lunghe diventano un'intestazione con le firme dei metodi più un chunk per metodo.
 In parallelo un'analisi statica costruisce il *symbol graph*: chi chiama chi, chi eredita da
@@ -17,10 +17,10 @@ chi. I chunk sono codificati con BGE-M3 e salvati in Qdrant.
 
 **Interrogazione.** Una domanda attraversa questi stadi:
 
-1. **Planner** (facoltativo): il modello scompone la domanda in sotto-domande, guidato da una
+1. **Planner** (facoltativo, utile per le domande complesse): il modello scompone la domanda in sotto-domande, guidato da una
    mappa del repository.
 2. **Ricerca densa**: i chunk più simili a ogni domanda, con una soglia di rilevanza.
-3. **Simboli nominati**: se la domanda cita `Classe.metodo`, il chunk che lo definisce entra
+3. **Simboli nominati**: se la domanda cita `Classe.metodo` o `unaFunzione`, il chunk che lo definisce entra
    direttamente.
 4. **Stesso file**: altri chunk dei file già trovati.
 5. **Symbol graph**: i vicini dei risultati (chiamati, chiamanti, classi base), ordinati con
@@ -69,8 +69,7 @@ Al primo avvio viene scaricato anche BGE-M3 (circa 2 GB), che resta in `hf_cache
 
 - In `docker-compose.yaml` elimina il blocco `deploy` del servizio `ollama`, segnalato dai
   commenti.
-- In `.env` imposta `INDEXER_GPU=0`: l'indicizzazione usa la CPU con ONNX Runtime (e OpenVINO
-  sulle CPU Intel).
+- In `.env` imposta `INDEXER_GPU=0`: l'indicizzazione usa la CPU con ONNX Runtime (e ottimizzazione per CPU Intel con OpenVINO).
 
 ## Configurazione
 
@@ -124,8 +123,7 @@ docker-compose.yaml      Definizione dei servizi
 ARCHITECTURE.md          Documentazione tecnica completa
 ```
 
-Il servizio `benchmark` citato in `docker-compose.yaml` e in `ARCHITECTURE.md` non è incluso
-in questo repository.
+Il microservizio `benchmark` non è attualmente incluso in questo repository.
 
 ## Dati persistenti
 
@@ -151,5 +149,3 @@ Esperto è un progetto di tesi pensato per l'uso in locale.
 - **Una codebase alla volta**: un nuovo ZIP sostituisce l'indice precedente.
 - **Risposte da verificare**: il prompt vincola il modello al codice recuperato, ma un modello
   piccolo può comunque sbagliare. Le fonti mostrate sotto ogni risposta servono a controllare.
-
-(il microservizio di benchmark non è attualemente caricato nella repo)
