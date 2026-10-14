@@ -1,6 +1,6 @@
 # Esperto di Codebase
 
-Esperto è un sistema RAG (Retrieval-Augmented Generation) che risponde in italiano a domande
+**Esperto per codebase Python** è un sistema RAG (Retrieval-Augmented Generation) che risponde in italiano a domande
 su una codebase Python. Si carica lo ZIP del progetto, Esperto lo indicizza e da quel momento
 risponde citando file, classi e funzioni da cui ha preso l'informazione.
 
@@ -151,3 +151,5 @@ Esperto è un progetto di tesi pensato per l'uso in locale.
 - **Una codebase alla volta**: un nuovo ZIP sostituisce l'indice precedente.
 - **Risposte da verificare**: il prompt vincola il modello al codice recuperato, ma un modello
   piccolo può comunque sbagliare. Le fonti mostrate sotto ogni risposta servono a controllare.
+
+(il microservizio di benchmark non è attualemente caricato nella repo)
